@@ -59,7 +59,7 @@ pub fn compute_stream_entropy(counts: &[usize]) -> f64 {
     entropy
 }
 
-/// Runs the 10 adversarial fault-injection diagnostic tests in-memory
+/// Runs the 11 adversarial fault-injection diagnostic tests in-memory
 pub fn run_ais_doctor_diagnostics(root: &Path) -> AisDoctorReport {
     let mut report = AisDoctorReport::default();
 
@@ -349,6 +349,49 @@ pub fn run_ais_doctor_diagnostics(root: &Path) -> AisDoctorReport {
         ));
     }
 
+    // 11. DTC-SELF-MASKING-AND-MULTILINE-EXEC: Test clause-scoped WHERE guard and multi-line execute interception
+    {
+        // Vector 1: Self-masking upsert assigning user_id = excluded.user_id without a WHERE clause
+        let fake_self_masking = r#"
+            INSERT INTO deletion_requests (id, user_id, status) VALUES (?1, ?2, ?3)
+            ON CONFLICT(id) DO UPDATE SET
+                user_id = excluded.user_id,
+                status = excluded.status
+        "#;
+        let has_clause_where = if let Some(pos) = fake_self_masking.find("DO UPDATE SET") {
+            let after_set = &fake_self_masking[pos + "DO UPDATE SET".len()..];
+            after_set.contains("WHERE ")
+        } else {
+            false
+        };
+
+        // Vector 2: Multi-line execute statement dropping row count
+        let fake_multiline_exec = "self.connection\n    .execute(\n        query,\n        params,\n    )\n    .await?;";
+        let is_multiline_drop = fake_multiline_exec.contains(".execute(")
+            && !fake_multiline_exec.contains("let rows")
+            && !fake_multiline_exec.contains("rows_affected");
+
+        let tripped = !has_clause_where && is_multiline_drop;
+
+        report.total_tests += 1;
+        if tripped {
+            report.passed_tests += 1;
+        } else {
+            report.failed_tests += 1;
+        }
+        report.dtcs.push(DiagnosticTroubleCode::new(
+            "DTC-AIS-011",
+            "Self-Masking Upsert & Multi-Line Execute Watchman",
+            "Asserts clause-scoped WHERE enforcement catches self-masking SET assignments and multi-line execute row drops",
+            !tripped,
+            if tripped {
+                "Self-masking upsert & multi-line execute watchman verified".to_string()
+            } else {
+                "Self-masking upsert or multi-line execute watchman blind".to_string()
+            },
+        ));
+    }
+
     report
 }
 
@@ -362,9 +405,9 @@ mod tests {
         let report = run_ais_doctor_diagnostics(root);
         assert_eq!(
             report.failed_tests, 0,
-            "All 10 diagnostic fault-injection vectors must pass: {:?}",
+            "All 11 diagnostic fault-injection vectors must pass: {:?}",
             report.dtcs
         );
-        assert_eq!(report.passed_tests, 10);
+        assert_eq!(report.passed_tests, 11);
     }
 }

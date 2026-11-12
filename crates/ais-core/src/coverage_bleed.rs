@@ -320,16 +320,24 @@ pub fn scan_sql_upsert_bleed(
                             || snippet_with_prefix.contains("compliance:ignore")
                             || snippet_with_prefix.contains("local-first:vault-writer");
 
-                        let has_owner_guard = detected_owners.iter().any(|o| {
-                            snippet.contains(&format!("WHERE {table_name}.{o} = excluded.{o}"))
-                                || snippet.contains(&format!("{table_name}.{o} = excluded.{o}"))
-                                || snippet.contains(&format!("WHERE {table_name}.{o} = ?"))
-                                || snippet.contains(&format!("{table_name}.{o} = ?"))
-                                || snippet.contains(&format!("WHERE {table_name}.{o}="))
-                                || snippet.contains(&format!("WHERE {table_name}.{o} ="))
-                                || snippet.contains(&format!("WHERE {o} = excluded.{o}"))
-                                || snippet.contains(&format!("{o} = excluded.{o}"))
-                        });
+                        let has_owner_guard = if let Some(do_update_pos) = snippet.find("DO UPDATE SET") {
+                            let after_do_update = &snippet[do_update_pos + "DO UPDATE SET".len()..];
+                            if let Some(where_pos) = after_do_update.find("WHERE ") {
+                                let where_clause = &after_do_update[where_pos..];
+                                detected_owners.iter().any(|o| {
+                                    where_clause.contains(&format!("{table_name}.{o} = excluded.{o}"))
+                                        || where_clause.contains(&format!("{table_name}.{o} = ?"))
+                                        || where_clause.contains(&format!("{table_name}.{o}="))
+                                        || where_clause.contains(&format!("{o} = excluded.{o}"))
+                                        || where_clause.contains(&format!("{o} = ?"))
+                                        || where_clause.contains(&format!("{o}="))
+                                })
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        };
 
                         if !has_owner_guard && !is_exempt {
                             let line_no = content[..actual_pos].lines().count();
@@ -704,33 +712,28 @@ pub fn scan_silent_noop_writes(root: &Path) -> (usize, usize, Vec<ConstructCover
             if has_exec {
                 // If the execute is executing a variable (e.g. &query, query, &sql, sql),
                 // inspect the SQL builder statements in the current function leading up to this execute.
-                let mut fn_start_idx = line_idx.saturating_sub(35);
+                let mut fn_start_idx = line_idx.saturating_sub(45);
                 for i in (fn_start_idx..line_idx).rev() {
                     let l = lines[i].trim();
-                    if l.starts_with("pub fn ")
-                        || l.starts_with("fn ")
-                        || l.starts_with("pub async fn ")
-                        || l.starts_with("async fn ")
-                    {
+                    if l.contains("fn ") && (l.starts_with("pub") || l.starts_with("async") || l.starts_with("fn ")) {
                         fn_start_idx = i;
                         break;
                     }
                 }
 
-                let forward_stmt = lines
-                    .iter()
-                    .skip(line_idx)
-                    .take(6)
-                    .copied()
-                    .collect::<Vec<_>>()
-                    .join(" ");
+                let mut stmt_lines = Vec::new();
+                for l in lines.iter().skip(line_idx).take(25) {
+                    stmt_lines.push(*l);
+                    if l.contains(';') {
+                        break;
+                    }
+                }
+                let forward_stmt = stmt_lines.join(" ");
 
-                let is_exec_var = trimmed.contains(".execute(&query")
-                    || trimmed.contains(".execute(query")
-                    || trimmed.contains(".execute(&sql")
-                    || trimmed.contains(".execute(sql")
-                    || trimmed.contains(".execute_with_params(&query")
-                    || trimmed.contains(".execute_with_params(&sql");
+                let exec_head = lines.iter().skip(line_idx).take(3).copied().collect::<Vec<_>>().join(" ");
+                let is_exec_var = exec_head.contains("query")
+                    || exec_head.contains("sql")
+                    || exec_head.contains(".execute_with_params(");
 
                 let sql_context = if is_exec_var {
                     let backward = lines[fn_start_idx..=line_idx].join(" ");
@@ -754,8 +757,8 @@ pub fn scan_silent_noop_writes(root: &Path) -> (usize, usize, Vec<ConstructCover
                     total_scanned += 1;
                     let lookahead_window = lines
                         .iter()
-                        .skip(line_idx.saturating_sub(3))
-                        .take(20)
+                        .skip(line_idx.saturating_sub(5))
+                        .take(stmt_lines.len() + 15)
                         .copied()
                         .collect::<Vec<_>>()
                         .join("\n");
