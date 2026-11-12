@@ -407,9 +407,9 @@ pub fn run_ais_doctor_diagnostics(root: &Path) -> AisDoctorReport {
 
         // Vector 2: Monotonic Hamilton apportionment for 6 equal shares (16.67% each)
         // Must apportion to [17, 17, 17, 17, 16, 16], NOT inverted [15, 17, 17, 17, 17, 17]
-        let equal_shares = [100.0, 100.0, 100.0, 100.0, 100.0, 100.0];
-        let total = 600.0;
-        let mut floors: Vec<u32> = equal_shares.iter().map(|&s| (s / total * 100.0).floor() as u32).collect();
+        let equal_shares = [100.0_f64, 100.0, 100.0, 100.0, 100.0, 100.0];
+        let total = 600.0_f64;
+        let mut floors: Vec<u32> = equal_shares.iter().map(|&s| (s / total * 100.0_f64).floor() as u32).collect();
         let rem = 100 - floors.iter().sum::<u32>();
         for f in floors.iter_mut().take(rem as usize) {
             *f += 1;

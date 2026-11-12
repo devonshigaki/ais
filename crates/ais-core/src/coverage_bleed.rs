@@ -491,7 +491,7 @@ pub fn scan_sql_update_bleed(
             let stmt_end = raw_snippet.find(';').unwrap_or(raw_snippet.len());
             let snippet = &raw_snippet[..stmt_end];
             let snippet_upper = safe_slice(&upper, actual_pos, stmt_end);
-            let forward_upper = safe_slice(&upper, actual_pos, forward_len);
+            let _forward_upper = safe_slice(&upper, actual_pos, forward_len);
 
             if snippet_upper.contains(" SET ") {
                 let words: Vec<&str> = snippet.split_whitespace().collect();
