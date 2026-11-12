@@ -702,6 +702,21 @@ pub fn scan_silent_noop_writes(root: &Path) -> (usize, usize, Vec<ConstructCover
             let has_exec =
                 trimmed.contains(".execute(") || trimmed.contains(".execute_with_params(");
             if has_exec {
+                // If the execute is executing a variable (e.g. &query, query, &sql, sql),
+                // inspect the SQL builder statements in the current function leading up to this execute.
+                let mut fn_start_idx = line_idx.saturating_sub(35);
+                for i in (fn_start_idx..line_idx).rev() {
+                    let l = lines[i].trim();
+                    if l.starts_with("pub fn ")
+                        || l.starts_with("fn ")
+                        || l.starts_with("pub async fn ")
+                        || l.starts_with("async fn ")
+                    {
+                        fn_start_idx = i;
+                        break;
+                    }
+                }
+
                 let forward_stmt = lines
                     .iter()
                     .skip(line_idx)
@@ -709,30 +724,31 @@ pub fn scan_silent_noop_writes(root: &Path) -> (usize, usize, Vec<ConstructCover
                     .copied()
                     .collect::<Vec<_>>()
                     .join(" ");
-                let backward_stmt = lines
-                    .iter()
-                    .skip(line_idx.saturating_sub(25))
-                    .take(line_idx.saturating_sub(line_idx.saturating_sub(25)) + 1)
-                    .copied()
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                let is_conditional_mutation = ((forward_stmt.contains("UPDATE ")
-                    || forward_stmt.contains("DELETE FROM ")
-                    || backward_stmt.contains("UPDATE ")
-                    || backward_stmt.contains("DELETE FROM "))
-                    && (forward_stmt.contains("WHERE ") || backward_stmt.contains("WHERE "))
-                    && (forward_stmt.contains("status !=")
-                        || forward_stmt.contains("status NOT IN")
-                        || backward_stmt.contains("status !=")
-                        || backward_stmt.contains("status NOT IN")))
-                    || (((forward_stmt.contains("DO UPDATE SET") && forward_stmt.find("DO UPDATE SET").is_some_and(|pos| {
-                            forward_stmt[pos..].contains("WHERE ")
-                                && forward_stmt[pos..].contains("excluded.")
-                        }))
-                        || (backward_stmt.contains("DO UPDATE SET") && backward_stmt.find("DO UPDATE SET").is_some_and(|pos| {
-                            backward_stmt[pos..].contains("WHERE ")
-                                && backward_stmt[pos..].contains("excluded.")
-                        }))));
+
+                let is_exec_var = trimmed.contains(".execute(&query")
+                    || trimmed.contains(".execute(query")
+                    || trimmed.contains(".execute(&sql")
+                    || trimmed.contains(".execute(sql")
+                    || trimmed.contains(".execute_with_params(&query")
+                    || trimmed.contains(".execute_with_params(&sql");
+
+                let sql_context = if is_exec_var {
+                    let backward = lines[fn_start_idx..=line_idx].join(" ");
+                    format!("{backward} {forward_stmt}")
+                } else {
+                    forward_stmt
+                };
+
+                let is_conditional_mutation = ((sql_context.contains("UPDATE ")
+                    || sql_context.contains("DELETE FROM "))
+                    && sql_context.contains("WHERE ")
+                    && (sql_context.contains("status !=")
+                        || sql_context.contains("status NOT IN")))
+                    || (sql_context.contains("DO UPDATE SET")
+                        && sql_context.find("DO UPDATE SET").is_some_and(|pos| {
+                            sql_context[pos..].contains("WHERE ")
+                                && sql_context[pos..].contains("excluded.")
+                        }));
 
                 if is_conditional_mutation {
                     total_scanned += 1;
