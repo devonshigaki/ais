@@ -407,22 +407,29 @@ fn scan_lock_inversion(
 ) {
     if let Some(query) = ASYNC_MUTEX_QUERY.as_ref() {
         let mut cursor = tree_sitter::QueryCursor::new();
-        let mut lock_lines_by_parent: std::collections::HashMap<usize, Vec<usize>> =
+        let mut locks_by_block: std::collections::HashMap<usize, Vec<(String, usize)>> =
             std::collections::HashMap::new();
 
         for m in cursor.matches(query, tree.root_node(), eval_content.as_bytes()) {
             for capture in m.captures {
                 if query.capture_names()[capture.index as usize] == "lock_call" {
+                    let receiver = capture
+                        .node
+                        .child_by_field_name("function")
+                        .and_then(|f| f.child_by_field_name("value"))
+                        .and_then(|v| v.utf8_text(eval_content.as_bytes()).ok())
+                        .unwrap_or("")
+                        .to_string();
+
                     let mut curr = capture.node.parent();
                     while let Some(parent) = curr {
-                        if parent.kind() == "function_item" || parent.kind() == "closure_expression"
-                        {
-                            let parent_id = parent.id();
+                        if parent.kind() == "block" {
+                            let block_id = parent.id();
                             let line = capture.node.start_position().row + 1;
-                            lock_lines_by_parent
-                                .entry(parent_id)
+                            locks_by_block
+                                .entry(block_id)
                                 .or_default()
-                                .push(line);
+                                .push((receiver, line));
                             break;
                         }
                         curr = parent.parent();
@@ -431,15 +438,25 @@ fn scan_lock_inversion(
             }
         }
 
-        for (_parent_id, lines) in lock_lines_by_parent {
-            let mut distinct_lines: Vec<usize> = lines;
-            distinct_lines.sort_unstable();
-            distinct_lines.dedup();
-            if distinct_lines.len() >= 2 {
-                let line = distinct_lines[1];
+        for (_block_id, locks) in locks_by_block {
+            let mut distinct_receivers = std::collections::HashSet::new();
+            for (recv, _) in &locks {
+                if !recv.is_empty() {
+                    distinct_receivers.insert(recv.clone());
+                }
+            }
+            if distinct_receivers.len() >= 2 {
+                let line = locks[1].1;
                 let line_text = eval_content.lines().nth(line - 1).unwrap_or("");
+                let prev_line_text = if line >= 2 {
+                    eval_content.lines().nth(line - 2).unwrap_or("")
+                } else {
+                    ""
+                };
                 if !line_text.contains("DEADLOCK-EXEMPT")
+                    && !prev_line_text.contains("DEADLOCK-EXEMPT")
                     && !line_text.contains("compliance:ignore")
+                    && !prev_line_text.contains("compliance:ignore")
                 {
                     violations.push(ScmQueryViolation {
                         rule_code: "DEADLOCK-001",
@@ -466,18 +483,44 @@ fn scan_toctou_race(
             for capture in m.captures {
                 if query.capture_names()[capture.index as usize] == "check_call" {
                     let mut curr = capture.node.parent();
+                    let mut is_in_condition = false;
+                    let mut enclosing_if = None;
                     while let Some(parent) = curr {
-                        if parent.kind() == "function_item" {
-                            let fn_text = parent.utf8_text(eval_content.as_bytes()).unwrap_or("");
-                            if fn_text.contains("write(")
-                                || fn_text.contains("create(")
-                                || fn_text.contains("remove_file(")
-                                || fn_text.contains("create_dir(")
+                        if parent.kind() == "if_expression" {
+                            if let Some(condition) = parent.child_by_field_name("condition") {
+                                if condition.byte_range().contains(&capture.node.start_byte()) {
+                                    is_in_condition = true;
+                                    enclosing_if = Some(parent);
+                                }
+                            }
+                            break;
+                        }
+                        curr = parent.parent();
+                    }
+
+                    if is_in_condition {
+                        if let Some(if_node) = enclosing_if {
+                            let if_text = if_node.utf8_text(eval_content.as_bytes()).unwrap_or("");
+                            if if_text.contains("fs::write(")
+                                || if_text.contains("std::fs::write(")
+                                || if_text.contains("fs::remove_file(")
+                                || if_text.contains("std::fs::remove_file(")
+                                || if_text.contains("fs::remove_dir(")
+                                || if_text.contains("std::fs::remove_dir(")
+                                || if_text.contains("File::create(")
+                                || if_text.contains("std::fs::File::create(")
                             {
                                 let line = capture.node.start_position().row + 1;
                                 let line_text = eval_content.lines().nth(line - 1).unwrap_or("");
+                                let prev_line_text = if line >= 2 {
+                                    eval_content.lines().nth(line - 2).unwrap_or("")
+                                } else {
+                                    ""
+                                };
                                 if !line_text.contains("TOCTOU-EXEMPT")
+                                    && !prev_line_text.contains("TOCTOU-EXEMPT")
                                     && !line_text.contains("compliance:ignore")
+                                    && !prev_line_text.contains("compliance:ignore")
                                 {
                                     violations.push(ScmQueryViolation {
                                         rule_code: "TOCTOU-001",
@@ -488,9 +531,7 @@ fn scan_toctou_race(
                                     });
                                 }
                             }
-                            break;
                         }
-                        curr = parent.parent();
                     }
                 }
             }
@@ -504,6 +545,16 @@ fn scan_atomic_ordering(
     tree: &tree_sitter::Tree,
     violations: &mut Vec<ScmQueryViolation>,
 ) {
+    let file_str = file.to_string_lossy();
+    if file_str.contains("/metrics")
+        || file_str.contains("telemetry")
+        || file_str.contains("/stats")
+        || file_str.contains("logger.rs")
+        || file_str.contains("benchmark")
+    {
+        return;
+    }
+
     if let Some(query) = ATOMIC_ORDER_QUERY.as_ref() {
         let mut cursor = tree_sitter::QueryCursor::new();
         for m in cursor.matches(query, tree.root_node(), eval_content.as_bytes()) {
