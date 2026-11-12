@@ -353,7 +353,7 @@ pub fn run_ais_doctor_diagnostics(root: &Path) -> AisDoctorReport {
     {
         // Vector 1: Self-masking upsert assigning user_id = excluded.user_id without a WHERE clause
         let fake_self_masking = r#"
-            INSERT INTO deletion_requests (id, user_id, status) VALUES (?1, ?2, ?3)
+            INSERT INTO deletion_requests (id, user_id, status) /* SQL-UPSERT-TENANT-EXEMPT: DTC-AIS-011 */ VALUES (?1, ?2, ?3)
             ON CONFLICT(id) DO UPDATE SET
                 user_id = excluded.user_id,
                 status = excluded.status
