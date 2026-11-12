@@ -262,7 +262,25 @@ pub fn scan_sql_upsert_bleed(
         while let Some(pos) = upper[search_idx..].find("INSERT INTO") {
             let actual_pos = search_idx + pos;
             let raw_snippet = safe_slice(&content, actual_pos, 3000);
-            let stmt_end = raw_snippet.find(';').unwrap_or(raw_snippet.len());
+            let stmt_end = if ext == "sql" {
+                raw_snippet.find(';').unwrap_or(raw_snippet.len())
+            } else if let Some(conf_pos) = raw_snippet.find("ON CONFLICT") {
+                let next_insert = raw_snippet["INSERT INTO".len()..]
+                    .find("INSERT INTO")
+                    .map(|p| p + "INSERT INTO".len());
+                if next_insert.map_or(true, |ni| conf_pos < ni) {
+                    let after_conf = &raw_snippet[conf_pos..];
+                    after_conf
+                        .find(';')
+                        .map(|p| conf_pos + p + 1)
+                        .unwrap_or(raw_snippet.len())
+                        .min(raw_snippet.len())
+                } else {
+                    raw_snippet.find(';').unwrap_or(raw_snippet.len())
+                }
+            } else {
+                raw_snippet.find(';').unwrap_or(raw_snippet.len())
+            };
             let snippet = &raw_snippet[..stmt_end];
             let snippet_upper = safe_slice(&upper, actual_pos, stmt_end);
 
@@ -681,7 +699,8 @@ pub fn scan_silent_noop_writes(root: &Path) -> (usize, usize, Vec<ConstructCover
             if trimmed.starts_with("//") || trimmed.starts_with("///") || trimmed.starts_with('*') {
                 continue;
             }
-            let has_exec = trimmed.contains(".execute(") || trimmed.contains(".execute_with_params(");
+            let has_exec =
+                trimmed.contains(".execute(") || trimmed.contains(".execute_with_params(");
             if has_exec {
                 let forward_stmt = lines
                     .iter()
@@ -690,18 +709,30 @@ pub fn scan_silent_noop_writes(root: &Path) -> (usize, usize, Vec<ConstructCover
                     .copied()
                     .collect::<Vec<_>>()
                     .join(" ");
+                let backward_stmt = lines
+                    .iter()
+                    .skip(line_idx.saturating_sub(25))
+                    .take(line_idx.saturating_sub(line_idx.saturating_sub(25)) + 1)
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 let is_conditional_mutation = ((forward_stmt.contains("UPDATE ")
-                    || forward_stmt.contains("DELETE FROM "))
-                    && forward_stmt.contains("WHERE ")
+                    || forward_stmt.contains("DELETE FROM ")
+                    || backward_stmt.contains("UPDATE ")
+                    || backward_stmt.contains("DELETE FROM "))
+                    && (forward_stmt.contains("WHERE ") || backward_stmt.contains("WHERE "))
                     && (forward_stmt.contains("status !=")
-                        || forward_stmt.contains("status NOT IN")))
-                    || (forward_stmt.contains("DO UPDATE SET")
-                        && forward_stmt
-                            .find("DO UPDATE SET")
-                            .is_some_and(|pos| {
-                                forward_stmt[pos..].contains("WHERE ")
-                                    && forward_stmt[pos..].contains("excluded.")
-                            }));
+                        || forward_stmt.contains("status NOT IN")
+                        || backward_stmt.contains("status !=")
+                        || backward_stmt.contains("status NOT IN")))
+                    || (((forward_stmt.contains("DO UPDATE SET") && forward_stmt.find("DO UPDATE SET").is_some_and(|pos| {
+                            forward_stmt[pos..].contains("WHERE ")
+                                && forward_stmt[pos..].contains("excluded.")
+                        }))
+                        || (backward_stmt.contains("DO UPDATE SET") && backward_stmt.find("DO UPDATE SET").is_some_and(|pos| {
+                            backward_stmt[pos..].contains("WHERE ")
+                                && backward_stmt[pos..].contains("excluded.")
+                        }))));
 
                 if is_conditional_mutation {
                     total_scanned += 1;

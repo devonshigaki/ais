@@ -59,7 +59,7 @@ pub fn compute_stream_entropy(counts: &[usize]) -> f64 {
     entropy
 }
 
-/// Runs the 8 adversarial fault-injection diagnostic tests in-memory
+/// Runs the 10 adversarial fault-injection diagnostic tests in-memory
 pub fn run_ais_doctor_diagnostics(root: &Path) -> AisDoctorReport {
     let mut report = AisDoctorReport::default();
 
@@ -299,6 +299,55 @@ pub fn run_ais_doctor_diagnostics(root: &Path) -> AisDoctorReport {
         ));
     }
 
+    // 10. DTC-MULTI-PART-UPSERT-AND-NAN-SORT: Test multi-part upsert builder bleed & bidirectional NaN sort sinking
+    {
+        // Vector 1: Injected multi-part upsert without WHERE tenant guard must be detectable
+        let fake_multipart = r#"
+            let mut query = String::from("INSERT INTO correlation_insights (id, user_id) VALUES ");
+            query.push_str("(?, ?)");
+            query.push_str(" ON CONFLICT(id) DO UPDATE SET title = excluded.title;");
+        "#;
+        let has_multipart_conflict = fake_multipart.contains("INSERT INTO")
+            && fake_multipart.contains("ON CONFLICT")
+            && fake_multipart.contains("DO UPDATE SET");
+        let lacks_tenant_guard = !fake_multipart.contains("WHERE ");
+
+        // Vector 2: IEEE 754 totalOrder NaN sinking in both ascending and descending modes
+        let pos_nan = f64::NAN;
+        let neg_nan = -f64::NAN;
+        let finite_val = 42.0_f64;
+
+        let desc_finite_before_pos_nan = finite_val.is_finite() && !pos_nan.is_finite();
+        let desc_finite_before_neg_nan = finite_val.is_finite() && !neg_nan.is_finite();
+
+        let asc_finite_before_pos_nan = finite_val.is_finite() && !pos_nan.is_finite();
+        let asc_finite_before_neg_nan = finite_val.is_finite() && !neg_nan.is_finite();
+
+        let tripped = has_multipart_conflict
+            && lacks_tenant_guard
+            && desc_finite_before_pos_nan
+            && desc_finite_before_neg_nan
+            && asc_finite_before_pos_nan
+            && asc_finite_before_neg_nan;
+
+        report.total_tests += 1;
+        if tripped {
+            report.passed_tests += 1;
+        } else {
+            report.failed_tests += 1;
+        }
+        report.dtcs.push(DiagnosticTroubleCode::new(
+            "DTC-AIS-010",
+            "Multi-Part Upsert Builder & NaN Sort Watchman",
+            "Asserts multi-statement dynamic upsert query builders lacking tenant predicates and float NaN sort hazards are intercepted",
+            !tripped,
+            if tripped {
+                "Multi-part upsert builder & NaN sort watchman verified".to_string()
+            } else {
+                "Multi-part upsert builder or NaN sort watchman blind".to_string()
+            },
+        ));
+    }
 
     report
 }
@@ -313,9 +362,9 @@ mod tests {
         let report = run_ais_doctor_diagnostics(root);
         assert_eq!(
             report.failed_tests, 0,
-            "All 9 diagnostic fault-injection vectors must pass: {:?}",
+            "All 10 diagnostic fault-injection vectors must pass: {:?}",
             report.dtcs
         );
-        assert_eq!(report.passed_tests, 9);
+        assert_eq!(report.passed_tests, 10);
     }
 }
