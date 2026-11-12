@@ -85,6 +85,28 @@ static NUM_DIV_QUERY: LazyLock<Option<tree_sitter::Query>> = LazyLock::new(|| {
     tree_sitter::Query::new(&language, div_scm).ok()
 });
 
+static TOCTOU_QUERY: LazyLock<Option<tree_sitter::Query>> = LazyLock::new(|| {
+    let language = tree_sitter_rust::language();
+    let toctou_scm = r#"
+        (call_expression
+          function: (field_expression
+            field: (field_identifier) @check (#match? @check "^(exists|is_file|is_dir)$"))
+        ) @check_call
+    "#;
+    tree_sitter::Query::new(&language, toctou_scm).ok()
+});
+
+static ATOMIC_ORDER_QUERY: LazyLock<Option<tree_sitter::Query>> = LazyLock::new(|| {
+    let language = tree_sitter_rust::language();
+    let atomic_scm = r#"
+        (scoped_identifier
+          path: (identifier) @path (#match? @path "^Ordering$")
+          name: (identifier) @order (#match? @order "^Relaxed$")
+        ) @relaxed_ref
+    "#;
+    tree_sitter::Query::new(&language, atomic_scm).ok()
+});
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScmQueryViolation {
     pub rule_code: &'static str,
@@ -140,6 +162,9 @@ pub fn scan_rust_declarative_queries(file: &Path, content: &str) -> Vec<ScmQuery
     );
     scan_crypto_timing(file, eval_content, &tree, &mut violations);
     scan_num_div(file, eval_content, &tree, &mut violations);
+    scan_lock_inversion(file, eval_content, &tree, &mut violations);
+    scan_toctou_race(file, eval_content, &tree, &mut violations);
+    scan_atomic_ordering(file, eval_content, &tree, &mut violations);
 
     violations
 }
@@ -374,6 +399,133 @@ fn scan_num_div(
     }
 }
 
+fn scan_lock_inversion(
+    file: &Path,
+    eval_content: &str,
+    tree: &tree_sitter::Tree,
+    violations: &mut Vec<ScmQueryViolation>,
+) {
+    if let Some(query) = ASYNC_MUTEX_QUERY.as_ref() {
+        let mut cursor = tree_sitter::QueryCursor::new();
+        let mut lock_lines_by_parent: std::collections::HashMap<usize, Vec<usize>> =
+            std::collections::HashMap::new();
+
+        for m in cursor.matches(query, tree.root_node(), eval_content.as_bytes()) {
+            for capture in m.captures {
+                if query.capture_names()[capture.index as usize] == "lock_call" {
+                    let mut curr = capture.node.parent();
+                    while let Some(parent) = curr {
+                        if parent.kind() == "function_item" || parent.kind() == "closure_expression" {
+                            let parent_id = parent.id();
+                            let line = capture.node.start_position().row + 1;
+                            lock_lines_by_parent
+                                .entry(parent_id)
+                                .or_default()
+                                .push(line);
+                            break;
+                        }
+                        curr = parent.parent();
+                    }
+                }
+            }
+        }
+
+        for (_parent_id, lines) in lock_lines_by_parent {
+            let mut distinct_lines: Vec<usize> = lines;
+            distinct_lines.sort_unstable();
+            distinct_lines.dedup();
+            if distinct_lines.len() >= 2 {
+                let line = distinct_lines[1];
+                let line_text = eval_content.lines().nth(line - 1).unwrap_or("");
+                if !line_text.contains("DEADLOCK-EXEMPT") && !line_text.contains("compliance:ignore") {
+                    violations.push(ScmQueryViolation {
+                        rule_code: "DEADLOCK-001",
+                        severity: Severity::High,
+                        description: "Multiple mutex lock guards acquired in nested scope; potential lock inversion (ABBA) deadlock hazard".to_string(),
+                        file_path: file.to_path_buf(),
+                        line,
+                    });
+                }
+            }
+        }
+    }
+}
+
+fn scan_toctou_race(
+    file: &Path,
+    eval_content: &str,
+    tree: &tree_sitter::Tree,
+    violations: &mut Vec<ScmQueryViolation>,
+) {
+    if let Some(query) = TOCTOU_QUERY.as_ref() {
+        let mut cursor = tree_sitter::QueryCursor::new();
+        for m in cursor.matches(query, tree.root_node(), eval_content.as_bytes()) {
+            for capture in m.captures {
+                if query.capture_names()[capture.index as usize] == "check_call" {
+                    let mut curr = capture.node.parent();
+                    while let Some(parent) = curr {
+                        if parent.kind() == "function_item" {
+                            let fn_text =
+                                parent.utf8_text(eval_content.as_bytes()).unwrap_or("");
+                            if fn_text.contains("write(")
+                                || fn_text.contains("create(")
+                                || fn_text.contains("remove_file(")
+                                || fn_text.contains("create_dir(")
+                            {
+                                let line = capture.node.start_position().row + 1;
+                                let line_text = eval_content.lines().nth(line - 1).unwrap_or("");
+                                if !line_text.contains("TOCTOU-EXEMPT")
+                                    && !line_text.contains("compliance:ignore")
+                                {
+                                    violations.push(ScmQueryViolation {
+                                        rule_code: "TOCTOU-001",
+                                        severity: Severity::Medium,
+                                        description: "Time-of-Check to Time-of-Use (TOCTOU) race condition; state check followed by non-atomic filesystem operation".to_string(),
+                                        file_path: file.to_path_buf(),
+                                        line,
+                                    });
+                                }
+                            }
+                            break;
+                        }
+                        curr = parent.parent();
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn scan_atomic_ordering(
+    file: &Path,
+    eval_content: &str,
+    tree: &tree_sitter::Tree,
+    violations: &mut Vec<ScmQueryViolation>,
+) {
+    if let Some(query) = ATOMIC_ORDER_QUERY.as_ref() {
+        let mut cursor = tree_sitter::QueryCursor::new();
+        for m in cursor.matches(query, tree.root_node(), eval_content.as_bytes()) {
+            for capture in m.captures {
+                if query.capture_names()[capture.index as usize] == "relaxed_ref" {
+                    let line = capture.node.start_position().row + 1;
+                    let line_text = eval_content.lines().nth(line - 1).unwrap_or("");
+                    if !line_text.contains("ATOMIC-EXEMPT")
+                        && !line_text.contains("compliance:ignore")
+                    {
+                        violations.push(ScmQueryViolation {
+                            rule_code: "ATOMIC-ORDER-001",
+                            severity: Severity::Medium,
+                            description: "Atomic operation using Ordering::Relaxed in synchronization path; memory ordering hazard on weak-memory architectures".to_string(),
+                            file_path: file.to_path_buf(),
+                            line,
+                        });
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub fn convert_to_findings(violations: Vec<ScmQueryViolation>) -> Vec<Finding> {
     violations
         .into_iter()
@@ -478,5 +630,47 @@ mod tests {
         let v = scan_rust_declarative_queries(Path::new("canary_div.rs"), code);
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].rule_code, "AST-NUM-DIV-001");
+    }
+
+    #[test]
+    fn test_tree_sitter_lock_inversion_deadlock() {
+        let code = r#"
+            use std::sync::Mutex;
+            pub fn transfer(a: &Mutex<i32>, b: &Mutex<i32>) {
+                let _ga = a.lock();
+                let _gb = b.lock();
+            }
+        "#;
+        let v = scan_rust_declarative_queries(Path::new("canary_deadlock.rs"), code);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].rule_code, "DEADLOCK-001");
+    }
+
+    #[test]
+    fn test_tree_sitter_toctou_race_condition() {
+        let code = r#"
+            use std::path::Path;
+            pub fn write_safe(path: &Path, data: &[u8]) {
+                if !path.exists() {
+                    let _ = std::fs::write(path, data);
+                }
+            }
+        "#;
+        let v = scan_rust_declarative_queries(Path::new("canary_toctou.rs"), code);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].rule_code, "TOCTOU-001");
+    }
+
+    #[test]
+    fn test_tree_sitter_atomic_relaxed_ordering() {
+        let code = r#"
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            pub fn bump_counter(counter: &AtomicUsize) {
+                counter.store(1, Ordering::Relaxed);
+            }
+        "#;
+        let v = scan_rust_declarative_queries(Path::new("canary_atomic.rs"), code);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].rule_code, "ATOMIC-ORDER-001");
     }
 }

@@ -228,8 +228,9 @@ pub struct ConstructCoverageFinding {
 pub fn scan_sql_upsert_bleed(
     root: &Path,
     catalog: &SchemaCatalog,
-) -> Vec<ConstructCoverageFinding> {
+) -> (usize, usize, Vec<ConstructCoverageFinding>) {
     let mut findings = Vec::new();
+    let mut total_scanned: usize = 0;
     let tracked = crate::discovery::collect_git_tracked_files(root);
 
     for rel_path in &tracked {
@@ -288,6 +289,7 @@ pub fn scan_sql_upsert_bleed(
                 if let Some((table_name, pk, detected_owners)) =
                     resolve_upsert_target(snippet, catalog)
                 {
+                    total_scanned += 1;
                     let mut conflict_has_owner = false;
                     if let Some(on_conf_pos) = snippet.find("ON CONFLICT") {
                         let after_conf = &snippet[on_conf_pos + "ON CONFLICT".len()..];
@@ -325,7 +327,16 @@ pub fn scan_sql_upsert_bleed(
                         {
                             let after_do_update = &snippet[do_update_pos + "DO UPDATE SET".len()..];
                             if let Some(where_pos) = after_do_update.find("WHERE ") {
-                                let where_clause = &after_do_update[where_pos..];
+                                let raw_where = &after_do_update[where_pos..];
+                                let in_quote_where =
+                                    raw_where.split('"').next().unwrap_or(raw_where);
+                                let where_clause = if let Some(r_pos) =
+                                    in_quote_where.to_uppercase().find(" RETURNING ")
+                                {
+                                    &in_quote_where[..r_pos]
+                                } else {
+                                    in_quote_where
+                                };
                                 detected_owners.iter().any(|o| {
                                     where_clause
                                         .contains(&format!("{table_name}.{o} = excluded.{o}"))
@@ -364,7 +375,8 @@ pub fn scan_sql_upsert_bleed(
         }
     }
 
-    findings
+    let guarded = total_scanned.saturating_sub(findings.len());
+    (total_scanned, guarded, findings)
 }
 
 /// Resolve the target table, primary key, and detected owner columns from an upsert snippet
@@ -520,17 +532,37 @@ pub fn scan_sql_update_bleed(
                             || raw_snippet.contains("key_hash")
                             || raw_snippet.contains("created_at <");
 
-                        let (has_where, has_owner) = if let Some(w_pos) = snippet_upper.find(" WHERE ") {
+                        let (has_where, has_owner) = if let Some(w_pos) =
+                            snippet_upper.find(" WHERE ")
+                        {
                             let set_clause = &snippet[..w_pos];
-                            let where_clause = &snippet[w_pos + " WHERE ".len()..];
+                            let raw_where = &snippet[w_pos + " WHERE ".len()..];
+                            let in_quote_where = raw_where.split('"').next().unwrap_or(raw_where);
+                            let where_clause = if let Some(r_pos) =
+                                in_quote_where.to_uppercase().find(" RETURNING ")
+                            {
+                                &in_quote_where[..r_pos]
+                            } else {
+                                in_quote_where
+                            };
                             let set_assigns_owner = [
-                                "user_id =", "user_id=",
-                                "tenant_id =", "tenant_id=",
-                                "consumer_id =", "consumer_id=",
-                                "provider_id =", "provider_id=",
-                                "author_id =", "author_id=",
-                                "payer_id =", "payer_id=",
-                            ].iter().any(|pattern| set_clause.to_lowercase().contains(pattern));
+                                "user_id =",
+                                "user_id=",
+                                "tenant_id =",
+                                "tenant_id=",
+                                "consumer_id =",
+                                "consumer_id=",
+                                "provider_id =",
+                                "provider_id=",
+                                "author_id =",
+                                "author_id=",
+                                "payer_id =",
+                                "payer_id=",
+                                "approved_by =",
+                                "approved_by=",
+                            ]
+                            .iter()
+                            .any(|pattern| set_clause.to_lowercase().contains(pattern));
 
                             let where_has_owner = where_clause.contains(owner)
                                 || where_clause.contains(&format!("{table_name}.{owner}"))
@@ -657,19 +689,54 @@ pub fn scan_sql_delete_bleed(
                         || raw_snippet.contains("status = 'dead_letter'")
                         || raw_snippet.contains("phone_number =");
 
-                    let has_where =
-                        snippet_upper.contains(" WHERE ") || forward_upper.contains(" WHERE ");
-                    let has_filter = raw_snippet.contains(owner)
-                        || raw_snippet.contains(&format!("{table_name}.{owner}"))
-                        || raw_snippet.contains("id =")
-                        || raw_snippet.contains("id=")
-                        || raw_snippet.contains("id IN")
-                        || raw_snippet.contains("id in")
-                        || raw_snippet.contains("user_id =")
-                        || raw_snippet.contains("consumer_id =")
-                        || raw_snippet.contains("phone_number =")
-                        || raw_snippet.contains(&format!("{table_name}.id"))
-                        || is_ttl_or_system;
+                    let (has_where, has_filter) = if let Some(w_pos) = snippet_upper.find(" WHERE ")
+                    {
+                        let raw_where = &snippet[w_pos + " WHERE ".len()..];
+                        let in_quote_where = raw_where.split('"').next().unwrap_or(raw_where);
+                        let where_clause = if let Some(r_pos) =
+                            in_quote_where.to_uppercase().find(" RETURNING ")
+                        {
+                            &in_quote_where[..r_pos]
+                        } else {
+                            in_quote_where
+                        };
+                        let ok = where_clause.contains(owner)
+                            || where_clause.contains(&format!("{table_name}.{owner}"))
+                            || where_clause.contains("id =")
+                            || where_clause.contains("id=")
+                            || where_clause.contains("id IN")
+                            || where_clause.contains("id in")
+                            || where_clause.contains("user_id =")
+                            || where_clause.contains("consumer_id =")
+                            || where_clause.contains("phone_number =")
+                            || where_clause.contains(&format!("{table_name}.id"))
+                            || is_ttl_or_system;
+                        (true, ok)
+                    } else if let Some(w_pos) = forward_upper.find(" WHERE ") {
+                        let raw_where = &raw_snippet[w_pos + " WHERE ".len()..];
+                        let in_quote_where = raw_where.split('"').next().unwrap_or(raw_where);
+                        let where_clause = if let Some(r_pos) =
+                            in_quote_where.to_uppercase().find(" RETURNING ")
+                        {
+                            &in_quote_where[..r_pos]
+                        } else {
+                            in_quote_where
+                        };
+                        let ok = where_clause.contains(owner)
+                            || where_clause.contains(&format!("{table_name}.{owner}"))
+                            || where_clause.contains("id =")
+                            || where_clause.contains("id=")
+                            || where_clause.contains("id IN")
+                            || where_clause.contains("id in")
+                            || where_clause.contains("user_id =")
+                            || where_clause.contains("consumer_id =")
+                            || where_clause.contains("phone_number =")
+                            || where_clause.contains(&format!("{table_name}.id"))
+                            || is_ttl_or_system;
+                        (true, ok)
+                    } else {
+                        (false, false)
+                    };
 
                     if (!has_where || !has_filter) && !is_exempt {
                         let line_no = content[..actual_pos].lines().count();
@@ -1142,7 +1209,7 @@ pub struct ConstructCoverageReport {
 /// Executes full construct-level coverage and schema invariant scan across all 6 hazard classes
 pub fn evaluate_construct_coverage(root: &Path) -> ConstructCoverageReport {
     let catalog = SchemaCatalog::discover(root);
-    let upsert_findings = scan_sql_upsert_bleed(root, &catalog);
+    let (upsert_total, upsert_guarded, upsert_findings) = scan_sql_upsert_bleed(root, &catalog);
     let (update_total, update_guarded, update_findings) = scan_sql_update_bleed(root, &catalog);
     let (delete_total, delete_guarded, delete_findings) = scan_sql_delete_bleed(root, &catalog);
     let (noop_total, noop_guarded, noop_findings) = scan_silent_noop_writes(root);
@@ -1154,8 +1221,6 @@ pub fn evaluate_construct_coverage(root: &Path) -> ConstructCoverageReport {
         .values()
         .filter(|t| !t.owner_columns.is_empty())
         .count();
-    let upsert_total = (multi_tenant_count * 2).max(upsert_findings.len() + 1);
-    let upsert_guarded = upsert_total.saturating_sub(upsert_findings.len());
 
     let total_hazards =
         upsert_total + update_total + delete_total + noop_total + num_total + sym_total;
