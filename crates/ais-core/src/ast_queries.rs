@@ -445,7 +445,8 @@ fn scan_lock_inversion(
                     distinct_receivers.insert(recv.clone());
                 }
             }
-            if distinct_receivers.len() >= 2 {
+            let has_unqualified_receivers = distinct_receivers.iter().any(|r| !r.contains('.'));
+            if distinct_receivers.len() >= 2 && has_unqualified_receivers {
                 let line = locks[1].1;
                 let line_text = eval_content.lines().nth(line - 1).unwrap_or("");
                 let prev_line_text = if line >= 2 {
@@ -482,6 +483,16 @@ fn scan_toctou_race(
         for m in cursor.matches(query, tree.root_node(), eval_content.as_bytes()) {
             for capture in m.captures {
                 if query.capture_names()[capture.index as usize] == "check_call" {
+                    let receiver = capture
+                        .node
+                        .child_by_field_name("function")
+                        .and_then(|f| f.child_by_field_name("value"))
+                        .and_then(|v| v.utf8_text(eval_content.as_bytes()).ok())
+                        .unwrap_or("");
+                    if receiver.ends_with("file_type()") {
+                        continue;
+                    }
+
                     let mut curr = capture.node.parent();
                     let mut is_in_condition = false;
                     let mut enclosing_if = None;

@@ -560,8 +560,7 @@ pub fn remediate_structure(root: &Path) -> (usize, Vec<String>) {
 
     // 1. Clean root cache if lingering
     let root_cache = root.join(".ais_scanner_cache.json");
-    if root_cache.exists() {
-        let _ = fs::remove_file(&root_cache);
+    if fs::remove_file(&root_cache).is_ok() {
         actions.push("Purged legacy root .ais_scanner_cache.json".to_string());
     }
 

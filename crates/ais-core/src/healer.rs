@@ -55,15 +55,6 @@ impl RemediationPatch {
 
     pub fn apply(&self, root: &Path) -> bool {
         let abs_path = root.join(&self.file_path);
-        if !abs_path.exists() {
-            if self.old_code.is_empty() {
-                if let Some(parent) = abs_path.parent() {
-                    let _ = fs::create_dir_all(parent);
-                }
-                return fs::write(&abs_path, &self.new_code).is_ok();
-            }
-            return false;
-        }
         if let Ok(content) = fs::read_to_string(&abs_path) {
             if content.contains(&self.old_code) {
                 let is_html = self.file_path.extension().and_then(|e| e.to_str()) == Some("html");
@@ -80,8 +71,15 @@ impl RemediationPatch {
                 let updated = content.replacen(&self.old_code, &replacement, 1);
                 return fs::write(&abs_path, updated).is_ok();
             }
+            false
+        } else if self.old_code.is_empty() {
+            if let Some(parent) = abs_path.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            fs::write(&abs_path, &self.new_code).is_ok()
+        } else {
+            false
         }
-        false
     }
 
     pub fn apply_to_string(&self, content: &str) -> String {
