@@ -481,7 +481,7 @@ fn run_scan(root: &Path, json: bool) -> ExitCode {
         .status();
     let audit_ok = audit_status.map(|s| s.success()).unwrap_or(false);
 
-    // Check 4: NASA/JPL Power of Ten Safety-Critical Rules
+    // Check 4: Power of Ten Safety-Critical Invariants
     print!("  • Power of Ten Safety-Critical Invariants (POT)... ");
     let pot_status = Command::new("cargo")
         .args(["xtask", "pot"])
@@ -846,7 +846,10 @@ fn run_doctor(root: &Path, json: bool) -> ExitCode {
     println!("╚══════════════════════════════════════════════════════════════════╝\n");
     println!("Total OBD-II Diagnostic Probes: {}", report.total_tests);
     println!("Passed Sensors & Watchmen:      {} 🟢", report.passed_tests);
-    println!("Failed Trouble Codes (DTCs):    {} 🔴\n", report.failed_tests);
+    println!(
+        "Failed Trouble Codes (DTCs):    {} 🔴\n",
+        report.failed_tests
+    );
 
     for dtc in &report.dtcs {
         let status = if !dtc.tripped {
@@ -866,11 +869,12 @@ fn run_doctor(root: &Path, json: bool) -> ExitCode {
         );
         ExitCode::SUCCESS
     } else {
-        println!("\n❌ DIAGNOSTIC FAULTS DETECTED: AIS watchmen failed to catch injected sabotage.");
+        println!(
+            "\n❌ DIAGNOSTIC FAULTS DETECTED: AIS watchmen failed to catch injected sabotage."
+        );
         ExitCode::FAILURE
     }
 }
-
 
 #[cfg(test)]
 mod tests {

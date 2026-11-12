@@ -68,6 +68,27 @@ pub fn compute_content_hash(s: &str) -> u64 {
     hasher.finish()
 }
 
+/// Computes a self-invalidating content-addressed fingerprint across ais-core engine source files
+pub fn compute_engine_fingerprint(root: &Path) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    let src_dir = root.join("crates/ais-core/src");
+    if let Ok(entries) = std::fs::read_dir(&src_dir) {
+        let mut paths: Vec<_> = entries
+            .filter_map(|e| e.ok().map(|ent| ent.path()))
+            .filter(|p| p.extension().is_some_and(|e| e == "rs"))
+            .collect();
+        paths.sort();
+        for p in paths {
+            if let Ok(content) = std::fs::read_to_string(&p) {
+                p.file_name().unwrap_or_default().hash(&mut hasher);
+                content.hash(&mut hasher);
+            }
+        }
+    }
+    hasher.finish()
+}
+
+
 pub fn load_layer_cache(root: &Path, engine_fingerprint: u64) -> AisLayerCache {
     let cache_path = root.join(AIS_LAYER_CACHE_FILE);
     if let Ok(content) = std::fs::read_to_string(&cache_path) {

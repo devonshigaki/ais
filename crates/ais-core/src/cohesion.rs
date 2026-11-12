@@ -567,7 +567,8 @@ pub fn analyze_workspace_cohesion(root: &Path) -> WorkspaceCohesionReport {
 
     let inv = crate::structure::WorkspaceInventory::discover(root);
     let all_files = inv.collect_canonical_files(root);
-    let mut cache = crate::cache::load_layer_cache(root, 444);
+    let engine_fp = crate::cache::compute_engine_fingerprint(root);
+    let mut cache = crate::cache::load_layer_cache(root, engine_fp);
 
     let per_file_results: Vec<(String, u64, Vec<StructCohesion>)> = all_files
         .into_par_iter()

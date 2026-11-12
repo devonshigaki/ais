@@ -425,7 +425,8 @@ fn is_ignored_dir(e: &walkdir::DirEntry) -> bool {
 pub fn scan_codebase_metrics(root: &Path) -> QualityMetricsReport {
     use rayon::prelude::*;
 
-    let mut cache = crate::cache::load_layer_cache(root, 444);
+    let engine_fp = crate::cache::compute_engine_fingerprint(root);
+    let mut cache = crate::cache::load_layer_cache(root, engine_fp);
     let mut files_to_scan = Vec::new();
 
     for entry in WalkDir::new(root)

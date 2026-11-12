@@ -145,7 +145,7 @@ impl WorkspaceSourceIndex {
                 let ext = p.extension().and_then(|s| s.to_str()).unwrap_or("");
                 if !matches!(
                     ext,
-                    "rs" | "ts" | "tsx" | "js" | "mjs" | "swift" | "kt" | "kts" | "sol"
+                    "rs" | "ts" | "tsx" | "js" | "mjs" | "swift" | "kt" | "kts" | "sol" | "html"
                 ) {
                     return None;
                 }
@@ -2411,7 +2411,8 @@ pub fn scan_all_workspace_opportunities(root: &Path) -> OpportunityScanReport {
     }
     let ws_hash = ws_hasher.finish();
 
-    let cache = crate::cache::load_layer_cache(root, 449);
+    let engine_fp = crate::cache::compute_engine_fingerprint(root);
+    let cache = crate::cache::load_layer_cache(root, engine_fp);
     if let Some((cached_hash, ref report)) = cache.cached_opportunities {
         if cached_hash == ws_hash {
             return report.clone();
