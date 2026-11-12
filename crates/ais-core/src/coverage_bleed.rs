@@ -320,12 +320,15 @@ pub fn scan_sql_upsert_bleed(
                             || snippet_with_prefix.contains("compliance:ignore")
                             || snippet_with_prefix.contains("local-first:vault-writer");
 
-                        let has_owner_guard = if let Some(do_update_pos) = snippet.find("DO UPDATE SET") {
+                        let has_owner_guard = if let Some(do_update_pos) =
+                            snippet.find("DO UPDATE SET")
+                        {
                             let after_do_update = &snippet[do_update_pos + "DO UPDATE SET".len()..];
                             if let Some(where_pos) = after_do_update.find("WHERE ") {
                                 let where_clause = &after_do_update[where_pos..];
                                 detected_owners.iter().any(|o| {
-                                    where_clause.contains(&format!("{table_name}.{o} = excluded.{o}"))
+                                    where_clause
+                                        .contains(&format!("{table_name}.{o} = excluded.{o}"))
                                         || where_clause.contains(&format!("{table_name}.{o} = ?"))
                                         || where_clause.contains(&format!("{table_name}.{o}="))
                                         || where_clause.contains(&format!("{o} = excluded.{o}"))
@@ -517,19 +520,40 @@ pub fn scan_sql_update_bleed(
                             || raw_snippet.contains("key_hash")
                             || raw_snippet.contains("created_at <");
 
-                        let has_where =
-                            snippet_upper.contains(" WHERE ") || forward_upper.contains(" WHERE ");
-                        let has_owner = raw_snippet.contains(owner)
-                            || raw_snippet.contains(&format!("{table_name}.{owner}"))
-                            || raw_snippet.contains("id =")
-                            || raw_snippet.contains("id=")
-                            || raw_snippet.contains("id IN")
-                            || raw_snippet.contains("id in")
-                            || raw_snippet.contains("consumer_id")
-                            || raw_snippet.contains("user_id")
-                            || raw_snippet.contains("report_id IN")
-                            || raw_snippet.contains(&format!("{table_name}.id"))
-                            || is_ttl_or_system;
+                        let (has_where, has_owner) = if let Some(w_pos) = snippet_upper.find(" WHERE ") {
+                            let set_clause = &snippet[..w_pos];
+                            let where_clause = &snippet[w_pos + " WHERE ".len()..];
+                            let set_assigns_owner = [
+                                "user_id =", "user_id=",
+                                "tenant_id =", "tenant_id=",
+                                "consumer_id =", "consumer_id=",
+                                "provider_id =", "provider_id=",
+                                "author_id =", "author_id=",
+                                "payer_id =", "payer_id=",
+                            ].iter().any(|pattern| set_clause.to_lowercase().contains(pattern));
+
+                            let where_has_owner = where_clause.contains(owner)
+                                || where_clause.contains(&format!("{table_name}.{owner}"))
+                                || where_clause.contains("user_id")
+                                || where_clause.contains("consumer_id")
+                                || where_clause.contains("tenant_id")
+                                || where_clause.contains("provider_id");
+
+                            let where_has_pk = where_clause.contains("id =")
+                                || where_clause.contains("id=")
+                                || where_clause.contains("id IN")
+                                || where_clause.contains("id in")
+                                || where_clause.contains(&format!("{table_name}.id"));
+
+                            let valid_owner_guard = if set_assigns_owner {
+                                where_has_owner
+                            } else {
+                                where_has_owner || where_has_pk || is_ttl_or_system
+                            };
+                            (true, valid_owner_guard)
+                        } else {
+                            (false, false)
+                        };
 
                         if (!has_where || !has_owner) && !is_exempt {
                             let line_no = content[..actual_pos].lines().count();
@@ -715,7 +739,9 @@ pub fn scan_silent_noop_writes(root: &Path) -> (usize, usize, Vec<ConstructCover
                 let mut fn_start_idx = line_idx.saturating_sub(45);
                 for i in (fn_start_idx..line_idx).rev() {
                     let l = lines[i].trim();
-                    if l.contains("fn ") && (l.starts_with("pub") || l.starts_with("async") || l.starts_with("fn ")) {
+                    if l.contains("fn ")
+                        && (l.starts_with("pub") || l.starts_with("async") || l.starts_with("fn "))
+                    {
                         fn_start_idx = i;
                         break;
                     }
@@ -730,7 +756,13 @@ pub fn scan_silent_noop_writes(root: &Path) -> (usize, usize, Vec<ConstructCover
                 }
                 let forward_stmt = stmt_lines.join(" ");
 
-                let exec_head = lines.iter().skip(line_idx).take(3).copied().collect::<Vec<_>>().join(" ");
+                let exec_head = lines
+                    .iter()
+                    .skip(line_idx)
+                    .take(3)
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 let is_exec_var = exec_head.contains("query")
                     || exec_head.contains("sql")
                     || exec_head.contains(".execute_with_params(");

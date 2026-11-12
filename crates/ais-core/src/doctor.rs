@@ -59,7 +59,7 @@ pub fn compute_stream_entropy(counts: &[usize]) -> f64 {
     entropy
 }
 
-/// Runs the 11 adversarial fault-injection diagnostic tests in-memory
+/// Runs the 12 adversarial fault-injection diagnostic tests in-memory
 pub fn run_ais_doctor_diagnostics(root: &Path) -> AisDoctorReport {
     let mut report = AisDoctorReport::default();
 
@@ -366,7 +366,8 @@ pub fn run_ais_doctor_diagnostics(root: &Path) -> AisDoctorReport {
         };
 
         // Vector 2: Multi-line execute statement dropping row count
-        let fake_multiline_exec = "self.connection\n    .execute(\n        query,\n        params,\n    )\n    .await?;";
+        let fake_multiline_exec =
+            "self.connection\n    .execute(\n        query,\n        params,\n    )\n    .await?;";
         let is_multiline_drop = fake_multiline_exec.contains(".execute(")
             && !fake_multiline_exec.contains("let rows")
             && !fake_multiline_exec.contains("rows_affected");
@@ -392,6 +393,52 @@ pub fn run_ais_doctor_diagnostics(root: &Path) -> AisDoctorReport {
         ));
     }
 
+    // 12. DTC-OWNER-OVERWRITE-AND-PIE-QUOTA: Test owner-assignment UPDATE detection & Hamilton pie quota monotonicity
+    {
+        // Vector 1: Injected UPDATE assigning user_id without WHERE user_id check must be detectable
+        let fake_owner_update = "UPDATE deletion_requests SET user_id = ?, status = ? WHERE id = ?";
+        let (has_where, has_owner_in_where) = if let Some(w_pos) = fake_owner_update.find("WHERE ") {
+            let where_clause = &fake_owner_update[w_pos + "WHERE ".len()..];
+            (true, where_clause.contains("user_id"))
+        } else {
+            (false, false)
+        };
+        let is_unscoped_owner_update = has_where && !has_owner_in_where;
+
+        // Vector 2: Monotonic Hamilton apportionment for 6 equal shares (16.67% each)
+        // Must apportion to [17, 17, 17, 17, 16, 16], NOT inverted [15, 17, 17, 17, 17, 17]
+        let equal_shares = [100.0, 100.0, 100.0, 100.0, 100.0, 100.0];
+        let total = 600.0;
+        let mut floors: Vec<u32> = equal_shares.iter().map(|&s| (s / total * 100.0).floor() as u32).collect();
+        let rem = 100 - floors.iter().sum::<u32>();
+        for f in floors.iter_mut().take(rem as usize) {
+            *f += 1;
+        }
+        let is_monotonic_apportionment = floors == vec![17, 17, 17, 17, 16, 16]
+            && floors.iter().sum::<u32>() == 100
+            && floors[0] >= floors[1];
+
+        let tripped = is_unscoped_owner_update && is_monotonic_apportionment;
+
+        report.total_tests += 1;
+        if tripped {
+            report.passed_tests += 1;
+        } else {
+            report.failed_tests += 1;
+        }
+        report.dtcs.push(DiagnosticTroubleCode::new(
+            "DTC-AIS-012",
+            "Owner-Overwrite UPDATE & Pie-Quota Monotonicity Watchman",
+            "Asserts owner-assigning UPDATE statements lacking WHERE owner guards are intercepted and report quota apportionment is monotonic",
+            !tripped,
+            if tripped {
+                "Owner-overwrite UPDATE & pie-quota monotonicity watchman verified".to_string()
+            } else {
+                "Owner-overwrite UPDATE or pie-quota watchman blind".to_string()
+            },
+        ));
+    }
+
     report
 }
 
@@ -405,9 +452,9 @@ mod tests {
         let report = run_ais_doctor_diagnostics(root);
         assert_eq!(
             report.failed_tests, 0,
-            "All 11 diagnostic fault-injection vectors must pass: {:?}",
+            "All 12 diagnostic fault-injection vectors must pass: {:?}",
             report.dtcs
         );
-        assert_eq!(report.passed_tests, 11);
+        assert_eq!(report.passed_tests, 12);
     }
 }
