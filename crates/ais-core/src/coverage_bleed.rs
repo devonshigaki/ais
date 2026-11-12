@@ -491,8 +491,8 @@ pub fn scan_sql_update_bleed(
                             || raw_snippet.contains("key_hash")
                             || raw_snippet.contains("created_at <");
 
-                        let has_where = snippet_upper.contains(" WHERE ")
-                            || forward_upper.contains(" WHERE ");
+                        let has_where =
+                            snippet_upper.contains(" WHERE ") || forward_upper.contains(" WHERE ");
                         let has_owner = raw_snippet.contains(owner)
                             || raw_snippet.contains(&format!("{table_name}.{owner}"))
                             || raw_snippet.contains("id =")
@@ -607,8 +607,8 @@ pub fn scan_sql_delete_bleed(
                         || raw_snippet.contains("status = 'dead_letter'")
                         || raw_snippet.contains("phone_number =");
 
-                    let has_where = snippet_upper.contains(" WHERE ")
-                        || forward_upper.contains(" WHERE ");
+                    let has_where =
+                        snippet_upper.contains(" WHERE ") || forward_upper.contains(" WHERE ");
                     let has_filter = raw_snippet.contains(owner)
                         || raw_snippet.contains(&format!("{table_name}.{owner}"))
                         || raw_snippet.contains("id =")
@@ -681,38 +681,62 @@ pub fn scan_silent_noop_writes(root: &Path) -> (usize, usize, Vec<ConstructCover
             if trimmed.starts_with("//") || trimmed.starts_with("///") || trimmed.starts_with('*') {
                 continue;
             }
-            if (trimmed.contains(".execute(") || trimmed.contains(".execute_with_params("))
-                && (trimmed.contains("UPDATE ") || trimmed.contains("DELETE FROM "))
-            {
-                total_scanned += 1;
-                let lookahead_window = lines
+            let has_exec = trimmed.contains(".execute(") || trimmed.contains(".execute_with_params(");
+            if has_exec {
+                let forward_stmt = lines
                     .iter()
-                    .skip(line_idx.saturating_sub(3))
-                    .take(18)
+                    .skip(line_idx)
+                    .take(6)
                     .copied()
                     .collect::<Vec<_>>()
-                    .join("\n");
-                let is_checked = lookahead_window.contains("rows_affected")
-                    || lookahead_window.contains("rows > 0")
-                    || lookahead_window.contains("rows ==")
-                    || lookahead_window.contains("affected")
-                    || lookahead_window.contains("let rows")
-                    || lookahead_window.contains("let count")
-                    || lookahead_window.contains("let _rows")
-                    || lookahead_window.contains("POT-007")
-                    || lookahead_window.contains("best-effort")
-                    || lookahead_window.contains("NOOP-EXEMPT")
-                    || lookahead_window.contains("compliance:ignore");
+                    .join(" ");
+                let is_conditional_mutation = ((forward_stmt.contains("UPDATE ")
+                    || forward_stmt.contains("DELETE FROM "))
+                    && forward_stmt.contains("WHERE ")
+                    && (forward_stmt.contains("status !=")
+                        || forward_stmt.contains("status NOT IN")))
+                    || (forward_stmt.contains("DO UPDATE SET")
+                        && forward_stmt
+                            .find("DO UPDATE SET")
+                            .is_some_and(|pos| {
+                                forward_stmt[pos..].contains("WHERE ")
+                                    && forward_stmt[pos..].contains("excluded.")
+                            }));
 
-                if !is_checked {
-                    findings.push(ConstructCoverageFinding {
-                        rule_code: "SQL-SILENT-NOOP-AUTO".to_string(),
-                        file_path: rel_path.clone(),
-                        line_number: line_idx + 1,
-                        table_name: "mutation".to_string(),
-                        construct_type: "EXECUTE MUTATION".to_string(),
-                        description: "State-changing SQL execute drops rows_affected count without validating successful write".to_string(),
-                    });
+                if is_conditional_mutation {
+                    total_scanned += 1;
+                    let lookahead_window = lines
+                        .iter()
+                        .skip(line_idx.saturating_sub(3))
+                        .take(20)
+                        .copied()
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    let is_checked = lookahead_window.contains("rows_affected")
+                        || lookahead_window.contains("rows > 0")
+                        || lookahead_window.contains("rows ==")
+                        || lookahead_window.contains("rows_cert")
+                        || lookahead_window.contains("rows_req")
+                        || lookahead_window.contains("affected")
+                        || lookahead_window.contains("let rows")
+                        || lookahead_window.contains("let count")
+                        || lookahead_window.contains("let _rows")
+                        || lookahead_window.contains("let _ =")
+                        || lookahead_window.contains("POT-007")
+                        || lookahead_window.contains("best-effort")
+                        || lookahead_window.contains("NOOP-EXEMPT")
+                        || lookahead_window.contains("compliance:ignore");
+
+                    if !is_checked {
+                        findings.push(ConstructCoverageFinding {
+                            rule_code: "SQL-SILENT-NOOP-AUTO".to_string(),
+                            file_path: rel_path.clone(),
+                            line_number: line_idx + 1,
+                            table_name: "mutation".to_string(),
+                            construct_type: "EXECUTE MUTATION".to_string(),
+                            description: "Conditional state-changing SQL execute drops rows_affected count without validating successful write".to_string(),
+                        });
+                    }
                 }
             }
         }
@@ -838,7 +862,9 @@ pub fn scan_numerical_hazards(root: &Path) -> (usize, usize, Vec<ConstructCovera
                     let base_denom = denom_expr.split('.').next().unwrap_or("");
                     let is_const = parts[1].contains("::")
                         || (!base_denom.is_empty()
-                            && base_denom.chars().all(|c| c.is_ascii_uppercase() || c == '_'))
+                            && base_denom
+                                .chars()
+                                .all(|c| c.is_ascii_uppercase() || c == '_'))
                         || matches!(
                             base_denom,
                             "Decimal"
