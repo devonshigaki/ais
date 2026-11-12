@@ -88,7 +88,6 @@ pub fn compute_engine_fingerprint(root: &Path) -> u64 {
     hasher.finish()
 }
 
-
 pub fn load_layer_cache(root: &Path, engine_fingerprint: u64) -> AisLayerCache {
     let cache_path = root.join(AIS_LAYER_CACHE_FILE);
     if let Ok(content) = std::fs::read_to_string(&cache_path) {

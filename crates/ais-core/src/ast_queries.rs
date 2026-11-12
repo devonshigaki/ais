@@ -415,7 +415,8 @@ fn scan_lock_inversion(
                 if query.capture_names()[capture.index as usize] == "lock_call" {
                     let mut curr = capture.node.parent();
                     while let Some(parent) = curr {
-                        if parent.kind() == "function_item" || parent.kind() == "closure_expression" {
+                        if parent.kind() == "function_item" || parent.kind() == "closure_expression"
+                        {
                             let parent_id = parent.id();
                             let line = capture.node.start_position().row + 1;
                             lock_lines_by_parent
@@ -437,7 +438,9 @@ fn scan_lock_inversion(
             if distinct_lines.len() >= 2 {
                 let line = distinct_lines[1];
                 let line_text = eval_content.lines().nth(line - 1).unwrap_or("");
-                if !line_text.contains("DEADLOCK-EXEMPT") && !line_text.contains("compliance:ignore") {
+                if !line_text.contains("DEADLOCK-EXEMPT")
+                    && !line_text.contains("compliance:ignore")
+                {
                     violations.push(ScmQueryViolation {
                         rule_code: "DEADLOCK-001",
                         severity: Severity::High,
@@ -465,8 +468,7 @@ fn scan_toctou_race(
                     let mut curr = capture.node.parent();
                     while let Some(parent) = curr {
                         if parent.kind() == "function_item" {
-                            let fn_text =
-                                parent.utf8_text(eval_content.as_bytes()).unwrap_or("");
+                            let fn_text = parent.utf8_text(eval_content.as_bytes()).unwrap_or("");
                             if fn_text.contains("write(")
                                 || fn_text.contains("create(")
                                 || fn_text.contains("remove_file(")

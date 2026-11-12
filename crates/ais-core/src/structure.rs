@@ -132,11 +132,17 @@ pub fn find_workspace_root(start: &Path) -> PathBuf {
             return current;
         }
         // Priority 2: Monorepo with Cargo.lock and apps/ or crates/
-        if current.join("Cargo.lock").exists() && (current.join("apps").exists() || current.join("crates").exists()) {
+        if current.join("Cargo.lock").exists()
+            && (current.join("apps").exists() || current.join("crates").exists())
+        {
             return current;
         }
         // Priority 3: standard repo root markers (.git, Cargo.toml, package.json)
-        if current.join(".git").exists() || current.join("Cargo.lock").exists() || current.join("package.json").exists() || current.join("pyproject.toml").exists() {
+        if current.join(".git").exists()
+            || current.join("Cargo.lock").exists()
+            || current.join("package.json").exists()
+            || current.join("pyproject.toml").exists()
+        {
             return current;
         }
         if !current.pop() {
