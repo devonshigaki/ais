@@ -303,8 +303,7 @@ pub fn run_ais_doctor_diagnostics(root: &Path) -> AisDoctorReport {
     {
         // Vector 1: Injected multi-part upsert without WHERE tenant guard must be detectable
         let fake_multipart = r#"
-            // SQL-UPSERT-TENANT-EXEMPT: Injected diagnostic fault for DTC-AIS-010
-            let mut query = String::from("INSERT INTO correlation_insights (id, user_id) VALUES ");
+            let mut query = String::from("INSERT INTO correlation_insights (id, user_id) /* SQL-UPSERT-TENANT-EXEMPT: DTC-AIS-010 */ VALUES ");
             query.push_str("(?, ?)");
             query.push_str(" ON CONFLICT(id) DO UPDATE SET title = excluded.title;");
         "#;
