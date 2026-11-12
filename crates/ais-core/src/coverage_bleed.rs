@@ -268,7 +268,7 @@ pub fn scan_sql_upsert_bleed(
                 let next_insert = raw_snippet["INSERT INTO".len()..]
                     .find("INSERT INTO")
                     .map(|p| p + "INSERT INTO".len());
-                if next_insert.map_or(true, |ni| conf_pos < ni) {
+                if next_insert.is_none_or(|ni| conf_pos < ni) {
                     let after_conf = &raw_snippet[conf_pos..];
                     after_conf
                         .find(';')
