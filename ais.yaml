@@ -1,0 +1,9 @@
+# Autonomous Iteration System (AIS) Manifest
+version: 1.0.0
+profile: "rust"
+languages: ["rust"]
+quality_gates:
+  min_maintainability_index: 65.0
+  max_cyclomatic_complexity: 25
+  min_construct_coverage_pct: 90.0
+cache_dir: ".ais/cache"
