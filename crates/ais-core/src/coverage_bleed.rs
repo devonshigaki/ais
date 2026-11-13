@@ -260,15 +260,32 @@ pub fn scan_sql_upsert_bleed(
         let upper = content.to_uppercase();
         let mut search_idx = 0;
 
-        while let Some(pos) = upper[search_idx..].find("INSERT INTO") {
+        while let Some(pos) = upper[search_idx..].find("INSERT") {
             let actual_pos = search_idx + pos;
+            let after_insert = &upper[actual_pos..];
+            let match_len = if after_insert.starts_with("INSERT INTO") {
+                Some("INSERT INTO".len())
+            } else if after_insert.starts_with("INSERT OR REPLACE INTO") {
+                Some("INSERT OR REPLACE INTO".len())
+            } else if after_insert.starts_with("INSERT OR IGNORE INTO") {
+                Some("INSERT OR IGNORE INTO".len())
+            } else {
+                None
+            };
+
+            let Some(kw_len) = match_len else {
+                search_idx = actual_pos + "INSERT".len();
+                continue;
+            };
+
             let raw_snippet = safe_slice(&content, actual_pos, 3000);
             let stmt_end = if ext == "sql" {
                 raw_snippet.find(';').unwrap_or(raw_snippet.len())
             } else if let Some(conf_pos) = raw_snippet.find("ON CONFLICT") {
-                let next_insert = raw_snippet["INSERT INTO".len()..]
-                    .find("INSERT INTO")
-                    .map(|p| p + "INSERT INTO".len());
+                let next_insert = raw_snippet[kw_len..]
+                    .to_uppercase()
+                    .find("INSERT")
+                    .map(|p| p + kw_len);
                 if next_insert.is_none_or(|ni| conf_pos < ni) {
                     let after_conf = &raw_snippet[conf_pos..];
                     after_conf
@@ -371,7 +388,7 @@ pub fn scan_sql_upsert_bleed(
                 }
             }
 
-            search_idx = actual_pos + "INSERT INTO".len();
+            search_idx = actual_pos + kw_len;
         }
     }
 
@@ -396,6 +413,20 @@ fn resolve_upsert_target(
             && i + 2 < words.len()
         {
             table_name_raw = words[i + 2];
+            break;
+        } else if words[i].eq_ignore_ascii_case("INSERT")
+            && words
+                .get(i + 1)
+                .is_some_and(|w| w.eq_ignore_ascii_case("OR"))
+            && words
+                .get(i + 2)
+                .is_some_and(|w| w.eq_ignore_ascii_case("REPLACE") || w.eq_ignore_ascii_case("IGNORE"))
+            && words
+                .get(i + 3)
+                .is_some_and(|w| w.eq_ignore_ascii_case("INTO"))
+            && i + 4 < words.len()
+        {
+            table_name_raw = words[i + 4];
             break;
         }
     }
