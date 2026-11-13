@@ -677,7 +677,8 @@ pub fn run_ais_doctor_diagnostics(root: &Path) -> AisDoctorReport {
 
         // Vector 2: Staging approval query must carry datetime(expires_at) > datetime('now')
         let approval_sql = "UPDATE uspto_staging SET status = 'approved', approved_at = ?, approved_by = ? WHERE user_id = ? AND status = 'pending' AND datetime(expires_at) > datetime('now')";
-        let is_approval_fenced = approval_sql.contains("status = 'pending' AND datetime(expires_at) > datetime('now')");
+        let is_approval_fenced =
+            approval_sql.contains("status = 'pending' AND datetime(expires_at) > datetime('now')");
 
         // Vector 3: Wilcoxon signed-rank zero-deviation rank conservation (T_+ + T_- = k(k+1)/2)
         let k = 10usize;
