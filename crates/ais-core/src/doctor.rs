@@ -781,21 +781,23 @@ pub fn run_ais_doctor_diagnostics(root: &Path) -> AisDoctorReport {
     // Diagnostic 19: Anchor Finality Monotonicity, On-Chain Expiry Fence & MCC Cauchy-Schwarz Watchman
     {
         // Vector 1: Anchor finality semilattice monotonicity (final state cannot regress to anchored)
-        let compute_next_anchor_state = |curr_state: &str, curr_block: i64, inc_block: i64| -> (&'static str, i64) {
-            let next_block = curr_block.max(inc_block);
-            let next_state = if curr_state == "final" || inc_block >= 6 {
-                "final"
-            } else {
-                "anchored"
+        let compute_next_anchor_state =
+            |curr_state: &str, curr_block: i64, inc_block: i64| -> (&'static str, i64) {
+                let next_block = curr_block.max(inc_block);
+                let next_state = if curr_state == "final" || inc_block >= 6 {
+                    "final"
+                } else {
+                    "anchored"
+                };
+                (next_state, next_block)
             };
-            (next_state, next_block)
-        };
         let (st, blk) = compute_next_anchor_state("final", 100, 0);
         let is_finality_monotonic = st == "final" && blk == 100;
 
         // Vector 2: On-chain approval queries must fence expires_at
         let onchain_sql = "UPDATE aave_staging SET status = 'approved', approved_at = ?, approved_by = ? WHERE user_id = ? AND status = 'pending' AND datetime(expires_at) > datetime('now')";
-        let is_onchain_expiry_fenced = onchain_sql.contains("status = 'pending' AND datetime(expires_at) > datetime('now')");
+        let is_onchain_expiry_fenced =
+            onchain_sql.contains("status = 'pending' AND datetime(expires_at) > datetime('now')");
 
         // Vector 3: MCC Cauchy-Schwarz boundedness [-1.0, 1.0] and zero-denominator stability
         let compute_mcc_safe = |td: f64, fd: f64, md: f64, cr: f64| -> f32 {
@@ -810,7 +812,8 @@ pub fn run_ais_doctor_diagnostics(root: &Path) -> AisDoctorReport {
         let mcc_zero = compute_mcc_safe(0.0, 0.0, 0.0, 0.0);
         let mcc_perfect = compute_mcc_safe(10.0, 0.0, 0.0, 10.0);
         let mcc_inverse = compute_mcc_safe(0.0, 10.0, 10.0, 0.0);
-        let is_mcc_bounded = mcc_zero == 0.0 && (mcc_perfect - 1.0).abs() < 1e-6 && (mcc_inverse + 1.0).abs() < 1e-6;
+        let is_mcc_bounded =
+            mcc_zero == 0.0 && (mcc_perfect - 1.0).abs() < 1e-6 && (mcc_inverse + 1.0).abs() < 1e-6;
 
         let tripped = is_finality_monotonic && is_onchain_expiry_fenced && is_mcc_bounded;
 

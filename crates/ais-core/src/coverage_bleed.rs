@@ -418,9 +418,9 @@ fn resolve_upsert_target(
             && words
                 .get(i + 1)
                 .is_some_and(|w| w.eq_ignore_ascii_case("OR"))
-            && words
-                .get(i + 2)
-                .is_some_and(|w| w.eq_ignore_ascii_case("REPLACE") || w.eq_ignore_ascii_case("IGNORE"))
+            && words.get(i + 2).is_some_and(|w| {
+                w.eq_ignore_ascii_case("REPLACE") || w.eq_ignore_ascii_case("IGNORE")
+            })
             && words
                 .get(i + 3)
                 .is_some_and(|w| w.eq_ignore_ascii_case("INTO"))
