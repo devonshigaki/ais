@@ -1,2 +1,5 @@
 target/
 .ais/cache/
+.freshcredit/cache/
+research/books/
+*.pdf
