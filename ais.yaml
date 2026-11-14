@@ -7,3 +7,47 @@ quality_gates:
   max_cyclomatic_complexity: 25
   min_construct_coverage_pct: 90.0
 cache_dir: ".ais/cache"
+
+rules:
+  HW-ALIGN-001:
+    description: "Cgroup Memory Alignment: Container memory limits MUST mathematically balance: Base_Buffers + (Max_Concurrent_Workers * Work_Mem) <= 0.60 * Host_Physical_RAM to prevent cgroup OOM kills under unthrottled CPU spikes."
+    severity: CRITICAL
+  HW-ALIGN-002:
+    description: "CPU CFS Quota Hardware Alignment: Pod CPU limits MUST be set to Host_Physical_Threads - 1.0 (reserving 1 thread for OS/Kubelet), and never set below 75% of available cores on dedicated bare-metal nodes."
+    severity: HIGH
+  HW-ALIGN-003:
+    description: "Connection Pool Sizing via Little's Law: Connection poolers (PgBouncer) MUST enforce: Server_Pool_Size <= (2 * Host_Physical_Cores) + Storage_Channels, while client connections may scale to 10,000+."
+    severity: CRITICAL
+  HW-ALIGN-004:
+    description: "Dynamic Hardware Synthesis: Production workloads MUST utilize init-containers or runtime scripts to dynamically probe hardware (/proc/meminfo, /proc/cpuinfo) and size thread pools and memory allocations mathematically at boot, forbidding hardcoded static limits where scalable."
+    severity: HIGH
+  HW-ALIGN-005:
+    description: "PSI Load Shedding: Mission-critical nodes MUST monitor Linux Pressure Stall Information (PSI) via /proc/pressure/memory and implement automatic API connection shedding if 'some avg10' > 5.00."
+    severity: CRITICAL
+  NET-ALIGN-001:
+    description: "Ephemeral Port Optimization: net.ipv4.ip_local_port_range MUST be 1024-65535 and net.ipv4.tcp_tw_reuse MUST be 1 to prevent outbound port exhaustion on reverse proxies."
+    severity: HIGH
+  NET-ALIGN-002:
+    description: "Socket Queue Depth & TCP Tuning: net.core.somaxconn MUST be >= 65535. Congestion control MUST be bbr with fq qdisc to prevent SYN drops and bufferbloat under high concurrency."
+    severity: CRITICAL
+  SEC-ALIGN-001:
+    description: "Zero Inbound Attack Surface: All ingress MUST route through outbound encrypted tunnels (Cloudflare QUIC or WireGuard). Direct listening sockets on public WAN interfaces are strictly forbidden."
+    severity: CRITICAL
+  SEC-ALIGN-002:
+    description: "Cryptographic Key Sealing & Ephemeral MFA: All TOTP secrets, API signing keys, and tenant credentials MUST be encrypted at rest using Vault Transit KMS with AES-256-GCM authenticated encryption."
+    severity: CRITICAL
+  SEC-ALIGN-003:
+    description: "Least Privilege & Container Confinement: Workload containers MUST enforce AppArmor/Seccomp enforcement modes with root file system protections and no unmapped Linux capabilities."
+    severity: HIGH
+  SRV-INFRA-001:
+    description: "Stateful Storage Segregation: OS/Binaries MUST reside on separate physical SSDs from Database WAL/Data to guarantee independent AHCI Native Command Queues (NCQ)."
+    severity: CRITICAL
+  SRV-PERF-007:
+    description: "Hardware Governor Tuning: The CPU scaling governor MUST be set to 'performance' and deep C-states limited (intel_idle.max_cstate=1) to prevent latency spikes during bursty fintech transactions."
+    severity: HIGH
+  FORMAL-008:
+    description: "Lean 4 Proof Efficacy: Architectural changes to admission control, storage topologies, or transaction queues MUST be formally proven in Lean 4 without unproven 'sorry' axioms to guarantee database starvation freedom and idempotency."
+    severity: CRITICAL
+  LANG-RUST-001:
+    description: "Pure Rust Execution Mandate: In accordance with profile 'rust', all production daemons, health monitors, admission controllers, and verification test suites MUST be compiled native Rust binaries. Python, Bash, or Node scripts are strictly flagged as Technical Debt and MUST have corresponding migration tickets in docs/BACKLOG.md."
+    severity: HIGH

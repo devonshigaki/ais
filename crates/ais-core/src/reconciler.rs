@@ -44,6 +44,7 @@ pub fn classify_rule_tier(rule_code: &str) -> RulePriorityTier {
         || rule_code.starts_with("AUTH")
         || rule_code.starts_with("PII")
         || rule_code.starts_with("HTMX-002")
+        || rule_code.starts_with("SEC-ALIGN")
     {
         RulePriorityTier::SecurityAndPrivacy
     } else if rule_code.starts_with("DDIA")
@@ -60,11 +61,17 @@ pub fn classify_rule_tier(rule_code: &str) -> RulePriorityTier {
     } else if rule_code.starts_with("PERF")
         || rule_code.starts_with("WASM")
         || rule_code.starts_with("OPP-PERF")
+        || rule_code.starts_with("HW-ALIGN")
+        || rule_code.starts_with("NET-ALIGN")
+        || rule_code.starts_with("SRV-PERF")
     {
         RulePriorityTier::PerformanceLatency
     } else if rule_code.starts_with("DDD")
         || rule_code.starts_with("POT")
         || rule_code.starts_with("ARCH")
+        || rule_code.starts_with("SRV-INFRA")
+        || rule_code.starts_with("FORMAL")
+        || rule_code.starts_with("LANG-RUST")
     {
         RulePriorityTier::ArchitecturalPurity
     } else {
