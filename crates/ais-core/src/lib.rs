@@ -1,4 +1,4 @@
-//! FreshCredit Autonomous Iteration System (AIS) Core Engine
+//! Autonomous Iteration System (AIS) Core Engine
 //!
 //! Agnostic, modular, AST-aware architecture and code quality framework:
 //! - Finding & Severity primitives

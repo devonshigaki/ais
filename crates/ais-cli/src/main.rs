@@ -398,7 +398,7 @@ fn run_heal(
 fn run_serve(port: u16) -> ExitCode {
     let addr = format!("127.0.0.1:{}", port);
     println!("╔══════════════════════════════════════════════════════════════════╗");
-    println!("║   FRESHCREDIT AIS STUDIO (Native Rust)                           ║");
+    println!("║   AIS STUDIO (Native Rust)                                       ║");
     println!("╚══════════════════════════════════════════════════════════════════╝");
     println!("🚀 Launching AIS Studio on http://{}", addr);
     println!(

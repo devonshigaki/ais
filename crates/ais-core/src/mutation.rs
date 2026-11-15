@@ -84,6 +84,35 @@ pub struct MutationAnalysisReport {
     pub boolean_mutations: usize,
     pub sample_mutations: Vec<MutationSite>,
     pub mutation_efficacy_score: f64,
+    pub empirical_outcomes_present: bool,
+    pub mutants_caught: u64,
+    pub mutants_missed: u64,
+}
+
+fn parse_cargo_mutants_outcomes(val: &serde_json::Value) -> Option<(u64, u64)> {
+    if let (Some(c), Some(m)) = (
+        val.get("caught").and_then(|v| v.as_u64()),
+        val.get("missed").and_then(|v| v.as_u64()),
+    ) {
+        if c + m > 0 {
+            return Some((c, m));
+        }
+    }
+    if let Some(arr) = val.get("outcomes").and_then(|v| v.as_array()) {
+        let mut caught = 0u64;
+        let mut missed = 0u64;
+        for item in arr {
+            match item.get("summary").and_then(|s| s.as_str()) {
+                Some("CaughtMutant") => caught += 1,
+                Some("MissedMutant") => missed += 1,
+                _ => {}
+            }
+        }
+        if caught + missed > 0 {
+            return Some((caught, missed));
+        }
+    }
+    None
 }
 
 pub fn analyze_mutation_coverage(root: &Path) -> MutationAnalysisReport {
@@ -95,13 +124,14 @@ pub fn analyze_mutation_coverage(root: &Path) -> MutationAnalysisReport {
         if mutants_path.is_file() {
             if let Ok(content) = std::fs::read_to_string(mutants_path) {
                 if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
-                    let caught = val.get("caught").and_then(|v| v.as_u64()).unwrap_or(0);
-                    let missed = val.get("missed").and_then(|v| v.as_u64()).unwrap_or(0);
-                    let total = caught + missed;
-                    if total > 0 {
+                    if let Some((caught, missed)) = parse_cargo_mutants_outcomes(&val) {
+                        let total = caught + missed;
                         let score = (caught as f64 / total as f64) * 100.0;
                         return MutationAnalysisReport {
                             mutation_efficacy_score: (score * 10.0).round() / 10.0,
+                            empirical_outcomes_present: true,
+                            mutants_caught: caught,
+                            mutants_missed: missed,
                             ..Default::default()
                         };
                     }

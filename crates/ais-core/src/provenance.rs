@@ -1,6 +1,6 @@
 //! Code Provenance & Triage Classification Engine
 //!
-//! Categorizes every file and finding across `/Users/devonshigaki/Developer/freshcredit/*`
+//! Categorizes every file and finding across the workspace
 //! into formal ownership tiers and actionable remediation paths:
 //! - First-Party Proprietary (apps/product/*, crates/*, packages/*, infra/*, xtask/*)
 //! - Forked & Satellite Services (apps/service/*)
@@ -11,7 +11,7 @@ use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProvenanceTier {
-    /// Core FreshCredit proprietary intellectual property
+    /// Core workspace first-party intellectual property
     FirstPartyProprietary,
     /// Satellite services adapted from open-source engines (Cal.com, Twenty, Documenso, etc.)
     ForkedSatellite,

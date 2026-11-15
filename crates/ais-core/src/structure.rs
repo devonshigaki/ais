@@ -354,6 +354,7 @@ pub fn check_database_leakage(root: &Path, findings: &mut Vec<Finding>) -> usize
                 && !p.contains("node_modules")
                 && !p.contains(".cargo")
                 && !p.contains(".rustup")
+                && !p.contains(".ais/data")
                 && !p.contains(".freshcredit/data")
                 && !p.contains("fixtures")
         })
@@ -381,7 +382,7 @@ pub fn check_database_leakage(root: &Path, findings: &mut Vec<Finding>) -> usize
                     line: 1,
                     confidence: Confidence::new(1.0),
                     suppressed: None,
-                    hint: Some("Store SQLite databases exclusively under .freshcredit/data/".to_string()),
+                    hint: Some("Store SQLite databases exclusively under .ais/data/".to_string()),
                 });
             }
         }
@@ -442,6 +443,7 @@ pub fn check_ais_isolation(root: &Path, findings: &mut Vec<Finding>) -> usize {
                 && !p.contains("node_modules")
                 && !p.contains(".cargo")
                 && !p.contains(".rustup")
+                && !p.contains(".ais/cache")
                 && !p.contains(".freshcredit/cache")
         })
         .flatten()
@@ -452,14 +454,17 @@ pub fn check_ais_isolation(root: &Path, findings: &mut Vec<Finding>) -> usize {
                 rule_code: "AIS-ISO-001".to_string(),
                 severity: Severity::High,
                 message: format!(
-                    "AIS scanner cache '{}' resides outside authorized .freshcredit/cache/ location",
+                    "AIS scanner cache '{}' resides outside authorized .ais/cache/ location",
                     entry.path().display()
                 ),
                 file: entry.path().to_path_buf(),
                 line: 1,
                 confidence: Confidence::new(1.0),
                 suppressed: None,
-                hint: Some("Relocate cache to .freshcredit/cache/ to isolate AIS tooling from product code".to_string()),
+                hint: Some(
+                    "Relocate cache to .ais/cache/ to isolate AIS tooling from product code"
+                        .to_string(),
+                ),
             });
         }
     }

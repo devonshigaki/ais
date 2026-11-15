@@ -49,8 +49,16 @@ pub fn generate_attribution_watermark_for_file(rule: &str, model: &str, path: &P
     }
 }
 
-pub fn generate_commit_author() -> (&'static str, &'static str) {
-    ("Devon Shigaki", "devon.shigaki@freshcredit.com")
+pub fn generate_commit_author() -> (String, String) {
+    let name = std::env::var("AIS_COMMIT_AUTHOR_NAME")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "AIS Autonomous Agent".to_string());
+    let email = std::env::var("AIS_COMMIT_AUTHOR_EMAIL")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "ais-bot@users.noreply.github.com".to_string());
+    (name, email)
 }
 
 #[cfg(test)]

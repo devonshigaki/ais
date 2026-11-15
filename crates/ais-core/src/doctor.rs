@@ -1884,6 +1884,43 @@ pub fn run_ais_doctor_diagnostics(root: &Path) -> AisDoctorReport {
         ));
     }
 
+    // 38. DTC-AIS-038: RFC 8725 Cross-JWT Scope Validation CST Watchman (JWT-SCOPE-001)
+    {
+        let unscoped =
+            "pub fn verify(tok: &str) {\n    let v = Validation::new(Algorithm::HS256);\n}";
+        let scoped = "pub fn verify(tok: &str) {\n    let mut v = Validation::new(Algorithm::HS256);\n    v.set_issuer(&[\"freshcredit-auth\"]);\n    v.set_audience(&[\"freshcredit-app\"]);\n}";
+        let tp = crate::ast_queries::scan_rust_declarative_queries(
+            Path::new("src/auth/jwt.rs"),
+            unscoped,
+        )
+        .iter()
+        .any(|v| v.rule_code == "JWT-SCOPE-001");
+        let tn = !crate::ast_queries::scan_rust_declarative_queries(
+            Path::new("src/auth/jwt.rs"),
+            scoped,
+        )
+        .iter()
+        .any(|v| v.rule_code == "JWT-SCOPE-001");
+        let tripped = tp && tn;
+        report.total_tests += 1;
+        if tripped {
+            report.passed_tests += 1;
+        } else {
+            report.failed_tests += 1;
+        }
+        report.dtcs.push(DiagnosticTroubleCode::new(
+            "DTC-AIS-038",
+            "RFC 8725 Cross-JWT Audience/Issuer Scope CST Watchman",
+            "Asserts JWT-SCOPE-001 flags Validation::new() lacking set_issuer()/set_audience() while allowing domain-isolated validators",
+            !tripped,
+            if tripped {
+                "JWT-SCOPE-001 CST true-positive & true-negative verified".to_string()
+            } else {
+                "JWT-SCOPE-001 CST probe failed".to_string()
+            },
+        ));
+    }
+
     report
 }
 
@@ -1897,9 +1934,9 @@ mod tests {
         let report = run_ais_doctor_diagnostics(root);
         assert_eq!(
             report.failed_tests, 0,
-            "All 37 diagnostic fault-injection vectors must pass: {:?}",
+            "All 38 diagnostic fault-injection vectors must pass: {:?}",
             report.dtcs
         );
-        assert_eq!(report.passed_tests, 37);
+        assert_eq!(report.passed_tests, 38);
     }
 }

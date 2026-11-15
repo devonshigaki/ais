@@ -15,8 +15,24 @@ use std::collections::BTreeMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::Path;
 
-pub const DEFAULT_CACHE_FILE: &str = ".freshcredit/cache/ais_scanner_cache.json";
-pub const AIS_LAYER_CACHE_FILE: &str = ".freshcredit/cache/ais_layer_cache.json";
+pub const DEFAULT_CACHE_FILE: &str = ".ais/cache/ais_scanner_cache.json";
+pub const AIS_LAYER_CACHE_FILE: &str = ".ais/cache/ais_layer_cache.json";
+
+/// Resolve the active layer-cache file path, honoring `AIS_CACHE_DIR` or
+/// existing project-local cache directories before falling back to `.ais/cache`.
+pub fn resolve_layer_cache_path(root: &Path) -> std::path::PathBuf {
+    if let Ok(dir) = std::env::var("AIS_CACHE_DIR") {
+        let trimmed = dir.trim();
+        if !trimmed.is_empty() {
+            return root.join(trimmed).join("ais_layer_cache.json");
+        }
+    }
+    let legacy_project_cache = root.join(".freshcredit/cache");
+    if legacy_project_cache.is_dir() {
+        return legacy_project_cache.join("ais_layer_cache.json");
+    }
+    root.join(AIS_LAYER_CACHE_FILE)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ScannerCache {
@@ -89,7 +105,7 @@ pub fn compute_engine_fingerprint(root: &Path) -> u64 {
 }
 
 pub fn load_layer_cache(root: &Path, engine_fingerprint: u64) -> AisLayerCache {
-    let cache_path = root.join(AIS_LAYER_CACHE_FILE);
+    let cache_path = resolve_layer_cache_path(root);
     if let Ok(content) = std::fs::read_to_string(&cache_path) {
         if let Ok(cache) = serde_json::from_str::<AisLayerCache>(&content) {
             if cache.engine_fingerprint == engine_fingerprint {
@@ -104,7 +120,7 @@ pub fn load_layer_cache(root: &Path, engine_fingerprint: u64) -> AisLayerCache {
 }
 
 pub fn save_layer_cache(root: &Path, cache: &AisLayerCache) {
-    let cache_path = root.join(AIS_LAYER_CACHE_FILE);
+    let cache_path = resolve_layer_cache_path(root);
     if let Some(parent) = cache_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }

@@ -290,16 +290,26 @@ pub fn plan_remediations(findings: &[Finding]) -> Vec<RemediationPatch> {
             }
 
             "TF-001" => {
+                let bucket = std::env::var("AIS_TF_STATE_BUCKET")
+                    .ok()
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or_else(|| "terraform-state-prod".to_string());
+                let target = format!("backend \"gcs\" {{ bucket = \"{bucket}\" }}");
                 patches.push(make_patch(
                     "backend \"local\"",
-                    "backend \"gcs\" { bucket = \"freshcredit-terraform-state-prod\" }",
+                    &target,
                     "Replace insecure local backend with encrypted GCS remote state storage (TF-001)",
                 ));
             }
             "TF-002" => {
+                let sa = std::env::var("AIS_GCP_SERVICE_ACCOUNT")
+                    .ok()
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or_else(|| "api-sa@project.iam.gserviceaccount.com".to_string());
+                let target = format!("\"serviceAccount:{sa}\"");
                 patches.push(make_patch(
                     "\"allUsers\"",
-                    "\"serviceAccount:freshcredit-api-sa@freshcredit-app.iam.gserviceaccount.com\"",
+                    &target,
                     "Replace public allUsers IAM grant with authenticated service account principal (TF-002)",
                 ));
             }
@@ -692,7 +702,8 @@ pub fn simulate_remediation_campaign(
 }
 
 fn commit_patch(root: &Path, patch: &RemediationPatch) -> bool {
-    let author_flag = "--author=Devon Shigaki <devon.shigaki@freshcredit.com>";
+    let (author_name, author_email) = crate::router::generate_commit_author();
+    let author_flag = format!("--author={author_name} <{author_email}>");
     let msg = format!(
         "fix(ais-auto-heal): [{}] {}",
         patch.rule_code, patch.description
@@ -704,7 +715,7 @@ fn commit_patch(root: &Path, patch: &RemediationPatch) -> bool {
         .status();
 
     let commit_res = std::process::Command::new("git")
-        .args(["commit", author_flag, "-m", &msg])
+        .args(["commit", &author_flag, "-m", &msg])
         .current_dir(root)
         .status();
 

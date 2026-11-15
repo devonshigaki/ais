@@ -155,6 +155,18 @@ static STRUCT_ITEM_QUERY: LazyLock<Option<tree_sitter::Query>> = LazyLock::new(|
     tree_sitter::Query::new(&language, scm).ok()
 });
 
+static JWT_VALIDATION_QUERY: LazyLock<Option<tree_sitter::Query>> = LazyLock::new(|| {
+    let language = tree_sitter_rust::language();
+    let scm = r#"
+        (call_expression
+          function: (scoped_identifier
+            path: (identifier) @ty (#match? @ty "^Validation$")
+            name: (identifier) @fn (#match? @fn "^new$"))
+        ) @val_call
+    "#;
+    tree_sitter::Query::new(&language, scm).ok()
+});
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScmQueryViolation {
     pub rule_code: &'static str,
@@ -224,6 +236,14 @@ pub fn scan_rust_declarative_queries(file: &Path, content: &str) -> Vec<ScmQuery
     scan_libsql_busy_timeout(file, eval_content, &tree, is_canary, &mut violations);
     scan_select_cancellation_safety(file, eval_content, &tree, &mut violations);
     scan_ast_plaintext_secret_fields(file, eval_content, &tree, is_canary, &mut violations);
+    scan_jwt_scope_validation(
+        file,
+        eval_content,
+        &tree,
+        is_canary,
+        &path_str,
+        &mut violations,
+    );
 
     violations
 }
@@ -710,7 +730,7 @@ fn scan_http_bounded_body(
                         violations.push(ScmQueryViolation {
                             rule_code: "HTTP-BOUND-001",
                             severity: Severity::Medium,
-                            description: "Unbounded HTTP response body buffering (.bytes()/.text().await) without Content-Length or streaming byte cap; use http_client_adapter::read_bounded_bytes/text".to_string(),
+                            description: "Unbounded HTTP response body buffering (.bytes()/.text().await) without Content-Length or streaming byte cap; use a bounded HTTP body reader (e.g. read_bounded_bytes/text)".to_string(),
                             file_path: file.to_path_buf(),
                             line,
                         });
@@ -924,6 +944,54 @@ fn scan_ast_plaintext_secret_fields(
     }
 }
 
+fn scan_jwt_scope_validation(
+    file: &Path,
+    eval_content: &str,
+    tree: &tree_sitter::Tree,
+    is_canary: bool,
+    path_str: &str,
+    violations: &mut Vec<ScmQueryViolation>,
+) {
+    // External Plaid webhook JWT verifiers sign body SHA-256 with ES256 and carry no iss/aud per Plaid spec.
+    if !is_canary
+        && (path_str.contains("plaid_webhook")
+            || path_str.contains("webhooks/plaid")
+            || path_str.contains("kyc/handlers/webhook"))
+    {
+        return;
+    }
+    if let Some(query) = JWT_VALIDATION_QUERY.as_ref() {
+        let mut cursor = tree_sitter::QueryCursor::new();
+        for m in cursor.matches(query, tree.root_node(), eval_content.as_bytes()) {
+            for capture in m.captures {
+                if query.capture_names()[capture.index as usize] != "val_call" {
+                    continue;
+                }
+                let mut curr = capture.node.parent();
+                while let Some(parent) = curr {
+                    if parent.kind() == "function_item" {
+                        let fn_txt = parent.utf8_text(eval_content.as_bytes()).unwrap_or("");
+                        let has_iss = fn_txt.contains("set_issuer(");
+                        let has_aud = fn_txt.contains("set_audience(");
+                        if !(has_iss && has_aud) {
+                            let line = capture.node.start_position().row + 1;
+                            violations.push(ScmQueryViolation {
+                                rule_code: "JWT-SCOPE-001",
+                                severity: Severity::High,
+                                description: "jsonwebtoken::Validation::new() lacks set_issuer() and set_audience() domain separation (RFC 8725 §3.8, §3.11)".to_string(),
+                                file_path: file.to_path_buf(),
+                                line,
+                            });
+                        }
+                        break;
+                    }
+                    curr = parent.parent();
+                }
+            }
+        }
+    }
+}
+
 pub fn convert_to_findings(violations: Vec<ScmQueryViolation>) -> Vec<Finding> {
     violations
         .into_iter()
@@ -992,6 +1060,28 @@ mod tests {
         let v = scan_rust_declarative_queries(Path::new("src/services/task.rs"), code);
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].rule_code, "ASYNC-MUTEX-001");
+    }
+
+    #[test]
+    fn test_jwt_scope_cst_rejects_unscoped_and_allows_scoped_validation() {
+        let bad = r#"
+            pub fn validate_bad(tok: &str) {
+                let mut v = Validation::new(Algorithm::HS256);
+                v.validate_exp = true;
+            }
+        "#;
+        let v_bad = scan_rust_declarative_queries(Path::new("src/auth/jwt.rs"), bad);
+        assert!(v_bad.iter().any(|x| x.rule_code == "JWT-SCOPE-001"));
+
+        let good = r#"
+            pub fn validate_good(tok: &str) {
+                let mut v = Validation::new(Algorithm::HS256);
+                v.set_issuer(&["freshcredit-auth"]);
+                v.set_audience(&["freshcredit-app"]);
+            }
+        "#;
+        let v_good = scan_rust_declarative_queries(Path::new("src/auth/jwt.rs"), good);
+        assert!(!v_good.iter().any(|x| x.rule_code == "JWT-SCOPE-001"));
     }
 
     #[test]

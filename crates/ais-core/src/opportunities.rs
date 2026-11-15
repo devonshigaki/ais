@@ -454,7 +454,7 @@ fn get_owning_service_domain(rel_path: &Path, _table: &str) -> PathBuf {
         || p.starts_with("crates/engine-ports/")
         || p.starts_with("crates/workers/scheduler/")
     {
-        return PathBuf::from("freshcredit-product");
+        return PathBuf::from("workspace-product");
     }
     if p.starts_with("apps/service/crm/") {
         return PathBuf::from("service-crm");
@@ -3052,7 +3052,7 @@ pub fn verify_synthetic_opportunity_probes() -> bool {
     let pushdown_code = r#"
         pub fn process_gradients(delta: &mut [f32], k: usize) -> CompressedSparse {
             dp::add_gaussian_noise(delta, 1.0, 1.0);
-            freshcredit_fl_compression::compress(delta, k)
+            fl_compression::compress(delta, k)
         }
     "#;
     let pushdown_file = IndexedSourceFile {
