@@ -213,7 +213,14 @@ pub fn scan_rust_declarative_queries(file: &Path, content: &str) -> Vec<ScmQuery
     scan_lock_inversion(file, eval_content, &tree, &mut violations);
     scan_toctou_race(file, eval_content, &tree, &mut violations);
     scan_atomic_ordering(file, eval_content, &tree, &mut violations);
-    scan_http_bounded_body(file, eval_content, &tree, is_canary, &path_str, &mut violations);
+    scan_http_bounded_body(
+        file,
+        eval_content,
+        &tree,
+        is_canary,
+        &path_str,
+        &mut violations,
+    );
     scan_libsql_busy_timeout(file, eval_content, &tree, is_canary, &mut violations);
     scan_select_cancellation_safety(file, eval_content, &tree, &mut violations);
     scan_ast_plaintext_secret_fields(file, eval_content, &tree, is_canary, &mut violations);
@@ -888,8 +895,7 @@ fn scan_ast_plaintext_secret_fields(
             }
 
             let normalized_ty: String = field_type.chars().filter(|c| !c.is_whitespace()).collect();
-            let is_plain_string =
-                normalized_ty == "String" || normalized_ty == "Option<String>";
+            let is_plain_string = normalized_ty == "String" || normalized_ty == "Option<String>";
             if !is_plain_string {
                 continue;
             }
@@ -1097,6 +1103,8 @@ mod tests {
         // Mixed struct: has one SecretString field AND one plaintext String secret field (old SEC-012 missed this!)
         let partial_secret = "#[derive(Debug, Clone)]\npub struct MixedConfig {\n    pub api_key: SecretString,\n    pub client_secret: String,\n}";
         let vsec = scan_rust_declarative_queries(Path::new("canary_sec.rs"), partial_secret);
-        assert!(vsec.iter().any(|x| x.rule_code == "AST-SECRET-EXPOSURE-001"));
+        assert!(vsec
+            .iter()
+            .any(|x| x.rule_code == "AST-SECRET-EXPOSURE-001"));
     }
 }

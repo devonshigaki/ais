@@ -1809,8 +1809,8 @@ pub fn run_ais_doctor_diagnostics(root: &Path) -> AisDoctorReport {
     // 36. DTC-AIS-036: Internal Functional Naming & Self-Branding Eradication Watchman
     {
         let fake_branded_code = "pub struct BlockIQVerificationService { pub db: FreshCreditDB }";
-        let is_brand_caught = fake_branded_code.contains("BlockIQ")
-            || fake_branded_code.contains("FreshCreditDB");
+        let is_brand_caught =
+            fake_branded_code.contains("BlockIQ") || fake_branded_code.contains("FreshCreditDB");
 
         let fake_branded_cargo = "name = \"freshcredit-agent-service\"";
         let is_cargo_brand_caught = fake_branded_cargo.starts_with("name = \"freshcredit-")
