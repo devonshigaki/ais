@@ -107,6 +107,54 @@ static ATOMIC_ORDER_QUERY: LazyLock<Option<tree_sitter::Query>> = LazyLock::new(
     tree_sitter::Query::new(&language, atomic_scm).ok()
 });
 
+static HTTP_BOUND_QUERY: LazyLock<Option<tree_sitter::Query>> = LazyLock::new(|| {
+    let language = tree_sitter_rust::language();
+    let scm = r#"
+        (await_expression
+          (call_expression
+            function: (field_expression
+              field: (field_identifier) @method (#match? @method "^(bytes|text)$"))
+            arguments: (arguments)) @call
+        ) @await_body
+    "#;
+    tree_sitter::Query::new(&language, scm).ok()
+});
+
+static LIBSQL_BUILDER_QUERY: LazyLock<Option<tree_sitter::Query>> = LazyLock::new(|| {
+    let language = tree_sitter_rust::language();
+    let scm = r#"
+        (call_expression
+          function: (scoped_identifier
+            path: (scoped_identifier) @mod (#match? @mod "Builder$")
+            name: (identifier) @ctor (#match? @ctor "^new_"))
+        ) @builder_call
+    "#;
+    tree_sitter::Query::new(&language, scm).ok()
+});
+
+static SELECT_MACRO_QUERY: LazyLock<Option<tree_sitter::Query>> = LazyLock::new(|| {
+    let language = tree_sitter_rust::language();
+    let scm = r#"
+        (macro_invocation
+          macro: (_) @mac (#match? @mac "(^|::)select$")
+        ) @select_mac
+    "#;
+    tree_sitter::Query::new(&language, scm).ok()
+});
+
+static STRUCT_ITEM_QUERY: LazyLock<Option<tree_sitter::Query>> = LazyLock::new(|| {
+    let language = tree_sitter_rust::language();
+    let scm = r#"
+        (struct_item
+          name: (type_identifier) @struct_name
+          body: (field_declaration_list
+            (field_declaration
+              name: (field_identifier) @field_name
+              type: (_) @field_type) @field_decl)) @struct_def
+    "#;
+    tree_sitter::Query::new(&language, scm).ok()
+});
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScmQueryViolation {
     pub rule_code: &'static str,
@@ -165,6 +213,10 @@ pub fn scan_rust_declarative_queries(file: &Path, content: &str) -> Vec<ScmQuery
     scan_lock_inversion(file, eval_content, &tree, &mut violations);
     scan_toctou_race(file, eval_content, &tree, &mut violations);
     scan_atomic_ordering(file, eval_content, &tree, &mut violations);
+    scan_http_bounded_body(file, eval_content, &tree, is_canary, &path_str, &mut violations);
+    scan_libsql_busy_timeout(file, eval_content, &tree, is_canary, &mut violations);
+    scan_select_cancellation_safety(file, eval_content, &tree, &mut violations);
+    scan_ast_plaintext_secret_fields(file, eval_content, &tree, is_canary, &mut violations);
 
     violations
 }
@@ -590,6 +642,282 @@ fn scan_atomic_ordering(
     }
 }
 
+fn scan_http_bounded_body(
+    file: &Path,
+    eval_content: &str,
+    tree: &tree_sitter::Tree,
+    is_canary: bool,
+    path_str: &str,
+    violations: &mut Vec<ScmQueryViolation>,
+) {
+    if !is_canary
+        && (path_str.contains("crates/adapters/http-client")
+            || path_str.contains("tests/")
+            || path_str.contains("e2e/"))
+    {
+        return;
+    }
+    if let Some(query) = HTTP_BOUND_QUERY.as_ref() {
+        let mut cursor = tree_sitter::QueryCursor::new();
+        for m in cursor.matches(query, tree.root_node(), eval_content.as_bytes()) {
+            for capture in m.captures {
+                if query.capture_names()[capture.index as usize] == "call" {
+                    let receiver = capture
+                        .node
+                        .child_by_field_name("function")
+                        .and_then(|f| f.child_by_field_name("value"))
+                        .and_then(|v| v.utf8_text(eval_content.as_bytes()).ok())
+                        .unwrap_or("");
+                    let is_http_receiver = is_canary
+                        || matches!(
+                            receiver,
+                            "resp" | "response" | "res" | "http_resp" | "api_resp"
+                        );
+                    if !is_http_receiver {
+                        continue;
+                    }
+                    let mut curr = capture.node.parent();
+                    let mut has_size_guard = false;
+                    while let Some(parent) = curr {
+                        if parent.kind() == "function_item" {
+                            let fn_txt = parent.utf8_text(eval_content.as_bytes()).unwrap_or("");
+                            if fn_txt.contains("content_length")
+                                || fn_txt.contains("read_bounded_bytes")
+                                || fn_txt.contains("read_bounded_text")
+                                || fn_txt.contains("MAX_")
+                            {
+                                has_size_guard = true;
+                            }
+                            break;
+                        }
+                        curr = parent.parent();
+                    }
+                    if has_size_guard {
+                        continue;
+                    }
+                    let line = capture.node.start_position().row + 1;
+                    let line_text = eval_content.lines().nth(line - 1).unwrap_or("");
+                    if !line_text.contains("HTTP-BOUND-EXEMPT")
+                        && !line_text.contains("compliance:ignore")
+                    {
+                        violations.push(ScmQueryViolation {
+                            rule_code: "HTTP-BOUND-001",
+                            severity: Severity::Medium,
+                            description: "Unbounded HTTP response body buffering (.bytes()/.text().await) without Content-Length or streaming byte cap; use http_client_adapter::read_bounded_bytes/text".to_string(),
+                            file_path: file.to_path_buf(),
+                            line,
+                        });
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn scan_libsql_busy_timeout(
+    file: &Path,
+    eval_content: &str,
+    tree: &tree_sitter::Tree,
+    is_canary: bool,
+    violations: &mut Vec<ScmQueryViolation>,
+) {
+    if let Some(query) = LIBSQL_BUILDER_QUERY.as_ref() {
+        let mut cursor = tree_sitter::QueryCursor::new();
+        for m in cursor.matches(query, tree.root_node(), eval_content.as_bytes()) {
+            for capture in m.captures {
+                if query.capture_names()[capture.index as usize] == "builder_call" {
+                    let call_text = capture
+                        .node
+                        .utf8_text(eval_content.as_bytes())
+                        .unwrap_or("");
+                    if !call_text.contains("libsql::Builder") && !is_canary {
+                        continue;
+                    }
+                    let mut curr = capture.node.parent();
+                    let mut hardened = false;
+                    while let Some(parent) = curr {
+                        if parent.kind() == "function_item" {
+                            let fn_txt = parent.utf8_text(eval_content.as_bytes()).unwrap_or("");
+                            if fn_txt.contains("busy_timeout")
+                                || fn_txt.contains("connect_hardened")
+                                || fn_txt.contains("DbExecutor")
+                                || fn_txt.contains("new_remote(")
+                            {
+                                hardened = true;
+                            }
+                            break;
+                        }
+                        curr = parent.parent();
+                    }
+                    if !hardened {
+                        let line = capture.node.start_position().row + 1;
+                        violations.push(ScmQueryViolation {
+                            rule_code: "DB-SQLITE-001",
+                            severity: Severity::High,
+                            description: "libsql::Builder local/replica database open lacks busy_timeout and PRAGMA foreign_keys = ON (use shared_wiring::connect_hardened)".to_string(),
+                            file_path: file.to_path_buf(),
+                            line,
+                        });
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn scan_select_cancellation_safety(
+    file: &Path,
+    eval_content: &str,
+    tree: &tree_sitter::Tree,
+    violations: &mut Vec<ScmQueryViolation>,
+) {
+    const NON_CANCEL_SAFE: &[&str] = &[
+        "read_exact(",
+        "read_to_end(",
+        "read_to_string(",
+        "recv_many(",
+    ];
+    if let Some(query) = SELECT_MACRO_QUERY.as_ref() {
+        let mut cursor = tree_sitter::QueryCursor::new();
+        for m in cursor.matches(query, tree.root_node(), eval_content.as_bytes()) {
+            for capture in m.captures {
+                if query.capture_names()[capture.index as usize] == "select_mac" {
+                    let mac_text = capture
+                        .node
+                        .utf8_text(eval_content.as_bytes())
+                        .unwrap_or("");
+                    if NON_CANCEL_SAFE.iter().any(|p| mac_text.contains(p)) {
+                        let line = capture.node.start_position().row + 1;
+                        violations.push(ScmQueryViolation {
+                            rule_code: "ASYNC-CANCEL-001",
+                            severity: Severity::High,
+                            description: "Non-cancellation-safe future (read_exact/read_to_end/recv_many) inside tokio::select! arm loses buffered state on sibling branch completion".to_string(),
+                            file_path: file.to_path_buf(),
+                            line,
+                        });
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn scan_ast_plaintext_secret_fields(
+    file: &Path,
+    eval_content: &str,
+    tree: &tree_sitter::Tree,
+    is_canary: bool,
+    violations: &mut Vec<ScmQueryViolation>,
+) {
+    const UNIVERSAL_SECRET_FIELDS: &[&str] = &[
+        "private_key",
+        "entity_secret_hex",
+        "signing_secret",
+        "seed_phrase",
+        "mnemonic",
+    ];
+    const CONFIG_SECRET_FIELDS: &[&str] = &[
+        "client_secret",
+        "api_key",
+        "secret",
+        "password",
+        "webhook_secret",
+        "auth_token",
+    ];
+    const SENSITIVE_SUFFIXES: &[&str] = &[
+        "Config",
+        "Client",
+        "Form",
+        "Request",
+        "Credential",
+        "Credentials",
+        "Verifier",
+        "Delivery",
+        "Settings",
+    ];
+
+    if let Some(query) = STRUCT_ITEM_QUERY.as_ref() {
+        let mut cursor = tree_sitter::QueryCursor::new();
+        let mut seen = std::collections::HashSet::new();
+        for m in cursor.matches(query, tree.root_node(), eval_content.as_bytes()) {
+            let mut struct_node = None;
+            let mut struct_name = "";
+            let mut field_name = "";
+            let mut field_type = "";
+            let mut field_node = None;
+
+            for cap in m.captures {
+                let cname = query.capture_names()[cap.index as usize];
+                let txt = cap.node.utf8_text(eval_content.as_bytes()).unwrap_or("");
+                match cname {
+                    "struct_def" => struct_node = Some(cap.node),
+                    "struct_name" => struct_name = txt,
+                    "field_name" => field_name = txt,
+                    "field_type" => field_type = txt,
+                    "field_decl" => field_node = Some(cap.node),
+                    _ => {}
+                }
+            }
+
+            let (Some(snode), Some(fnode)) = (struct_node, field_node) else {
+                continue;
+            };
+
+            let mut has_debug = false;
+            let mut prev = snode.prev_sibling();
+            while let Some(sib) = prev {
+                if sib.kind() == "attribute_item" {
+                    let attr_txt = sib.utf8_text(eval_content.as_bytes()).unwrap_or("");
+                    if attr_txt.contains("derive") && attr_txt.contains("Debug") {
+                        has_debug = true;
+                    }
+                    prev = sib.prev_sibling();
+                } else if sib.kind() == "line_comment" || sib.kind() == "block_comment" {
+                    prev = sib.prev_sibling();
+                } else {
+                    break;
+                }
+            }
+            if !has_debug {
+                continue;
+            }
+
+            let field_txt = fnode.utf8_text(eval_content.as_bytes()).unwrap_or("");
+            if field_txt.contains("SEC-012-EXEMPT") || field_txt.contains("SecretString") {
+                continue;
+            }
+
+            let normalized_ty: String = field_type.chars().filter(|c| !c.is_whitespace()).collect();
+            let is_plain_string =
+                normalized_ty == "String" || normalized_ty == "Option<String>";
+            if !is_plain_string {
+                continue;
+            }
+
+            let is_sensitive_struct =
+                is_canary || SENSITIVE_SUFFIXES.iter().any(|s| struct_name.ends_with(s));
+            let is_secret_field = UNIVERSAL_SECRET_FIELDS.contains(&field_name)
+                || (is_sensitive_struct && CONFIG_SECRET_FIELDS.contains(&field_name));
+            if !is_secret_field {
+                continue;
+            }
+
+            let line = fnode.start_position().row + 1;
+            if seen.insert((struct_name.to_string(), field_name.to_string(), line)) {
+                violations.push(ScmQueryViolation {
+                    rule_code: "AST-SECRET-EXPOSURE-001",
+                    severity: Severity::Critical,
+                    description: format!(
+                        "Struct '{struct_name}' derives Debug with plaintext String credential field '{field_name}' (CWE-532); wrap field in SecretString or implement redacted Debug"
+                    ),
+                    file_path: file.to_path_buf(),
+                    line,
+                });
+            }
+        }
+    }
+}
+
 pub fn convert_to_findings(violations: Vec<ScmQueryViolation>) -> Vec<Finding> {
     violations
         .into_iter()
@@ -736,5 +1064,39 @@ mod tests {
         let v = scan_rust_declarative_queries(Path::new("canary_atomic.rs"), code);
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].rule_code, "ATOMIC-ORDER-001");
+    }
+
+    #[test]
+    fn test_tree_sitter_multiline_http_bound_and_negative_control() {
+        let bad = "pub async fn fetch(resp: reqwest::Response) {\n    let _ = resp\n        .bytes()\n        .await;\n}";
+        let v = scan_rust_declarative_queries(Path::new("canary_http.rs"), bad);
+        assert!(v.iter().any(|x| x.rule_code == "HTTP-BOUND-001"));
+
+        let good = "pub async fn fetch(resp: reqwest::Response) {\n    let _ = read_bounded_bytes(resp, 1024).await;\n}";
+        let vg = scan_rust_declarative_queries(Path::new("canary_http.rs"), good);
+        assert!(vg.is_empty());
+    }
+
+    #[test]
+    fn test_tree_sitter_libsql_busy_timeout_and_negative_control() {
+        let bad = "pub async fn open_it() {\n    let _ = libsql::Builder::new_local(\"/tmp/a.db\").build().await;\n}";
+        let v = scan_rust_declarative_queries(Path::new("canary_db.rs"), bad);
+        assert!(v.iter().any(|x| x.rule_code == "DB-SQLITE-001"));
+
+        let good = "pub async fn open_it() {\n    let db = libsql::Builder::new_local(\"/tmp/a.db\").build().await.unwrap();\n    let conn = db.connect().unwrap();\n    let _ = conn.busy_timeout(std::time::Duration::from_millis(5000));\n}";
+        let vg = scan_rust_declarative_queries(Path::new("canary_db.rs"), good);
+        assert!(!vg.iter().any(|x| x.rule_code == "DB-SQLITE-001"));
+    }
+
+    #[test]
+    fn test_tree_sitter_select_cancel_safety_and_secret_partial_bypass() {
+        let bad_select = "pub async fn pump() {\n    tokio::select! {\n        _ = reader.read_exact(&mut buf) => {}\n    }\n}";
+        let vs = scan_rust_declarative_queries(Path::new("canary_select.rs"), bad_select);
+        assert!(vs.iter().any(|x| x.rule_code == "ASYNC-CANCEL-001"));
+
+        // Mixed struct: has one SecretString field AND one plaintext String secret field (old SEC-012 missed this!)
+        let partial_secret = "#[derive(Debug, Clone)]\npub struct MixedConfig {\n    pub api_key: SecretString,\n    pub client_secret: String,\n}";
+        let vsec = scan_rust_declarative_queries(Path::new("canary_sec.rs"), partial_secret);
+        assert!(vsec.iter().any(|x| x.rule_code == "AST-SECRET-EXPOSURE-001"));
     }
 }

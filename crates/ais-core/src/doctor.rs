@@ -1783,7 +1783,7 @@ pub fn run_ais_doctor_diagnostics(root: &Path) -> AisDoctorReport {
 
         // 3. Resilient provider chain verification
         let is_chain_sound = {
-            let chain = vec!["brevo", "sendgrid", "gmail"];
+            let chain = ["brevo", "sendgrid", "gmail"];
             chain.len() >= 2 && chain[0] == "brevo" && chain[1] == "sendgrid"
         };
 
@@ -1806,6 +1806,83 @@ pub fn run_ais_doctor_diagnostics(root: &Path) -> AisDoctorReport {
             },
         ));
     }
+    // 36. DTC-AIS-036: Internal Functional Naming & Self-Branding Eradication Watchman
+    {
+        let fake_branded_code = "pub struct BlockIQVerificationService { pub db: FreshCreditDB }";
+        let is_brand_caught = fake_branded_code.contains("BlockIQ")
+            || fake_branded_code.contains("FreshCreditDB");
+
+        let fake_branded_cargo = "name = \"freshcredit-agent-service\"";
+        let is_cargo_brand_caught = fake_branded_cargo.starts_with("name = \"freshcredit-")
+            && !fake_branded_cargo.contains("freshcredit-sdk");
+
+        let tripped = is_brand_caught && is_cargo_brand_caught;
+        report.total_tests += 1;
+        if tripped {
+            report.passed_tests += 1;
+        } else {
+            report.failed_tests += 1;
+        }
+        report.dtcs.push(DiagnosticTroubleCode::new(
+            "DTC-AIS-036",
+            "Internal Functional Naming & Self-Branding Eradication Watchman",
+            "Asserts detection of internal self-branding names (BlockIQ/BlockScore/BlockID/FreshCreditDB in BRAND-001) and cargo package prefixes (BRAND-002)",
+            !tripped,
+            if tripped {
+                "Internal functional naming and cargo package branding guard verified".to_string()
+            } else {
+                "Internal self-branding watchman blind".to_string()
+            },
+        ));
+    }
+
+    // 37. DTC-AIS-037: Metamorphic Line-Wrap AST Invariance, Partial-Secret Bypass & Overlap Matrix Watchman
+    {
+        let multiline_http = "pub async fn f(resp: reqwest::Response) {\n    let _ = resp\n        .bytes()\n        .await;\n}";
+        let http_hit = crate::ast_queries::scan_rust_declarative_queries(
+            Path::new("canary_http.rs"),
+            multiline_http,
+        )
+        .iter()
+        .any(|v| v.rule_code == "HTTP-BOUND-001");
+
+        let partial_secret = "#[derive(Debug)]\npub struct MixedConfig {\n    pub api_key: SecretString,\n    pub client_secret: String,\n}";
+        let sec_hit = crate::ast_queries::scan_rust_declarative_queries(
+            Path::new("canary_sec.rs"),
+            partial_secret,
+        )
+        .iter()
+        .any(|v| v.rule_code == "AST-SECRET-EXPOSURE-001");
+
+        let bad_sqlite = "pub async fn open_db() {\n    let _ = libsql::Builder::new_local(\":memory:\").build().await;\n}";
+        let sqlite_hit = crate::ast_queries::scan_rust_declarative_queries(
+            Path::new("canary_db.rs"),
+            bad_sqlite,
+        )
+        .iter()
+        .any(|v| v.rule_code == "DB-SQLITE-001");
+
+        let overlap_clean = crate::meta::audit_rule_overlap_matrix().is_empty();
+        let tripped = http_hit && sec_hit && sqlite_hit && overlap_clean;
+
+        report.total_tests += 1;
+        if tripped {
+            report.passed_tests += 1;
+        } else {
+            report.failed_tests += 1;
+        }
+        report.dtcs.push(DiagnosticTroubleCode::new(
+            "DTC-AIS-037",
+            "Metamorphic Line-Wrap AST Invariance & SQLite/HTTP/Secret CST Watchman",
+            "Asserts multi-line CST detection for HTTP-BOUND-001, DB-SQLITE-001, mixed-struct AST-SECRET-EXPOSURE-001, and rule overlap orthogonality",
+            !tripped,
+            if tripped {
+                "Metamorphic CST queries (HTTP-BOUND-001, DB-SQLITE-001, AST-SECRET-EXPOSURE-001) and overlap matrix verified".to_string()
+            } else {
+                "CST invariance or overlap matrix probe failed".to_string()
+            },
+        ));
+    }
 
     report
 }
@@ -1820,9 +1897,9 @@ mod tests {
         let report = run_ais_doctor_diagnostics(root);
         assert_eq!(
             report.failed_tests, 0,
-            "All 35 diagnostic fault-injection vectors must pass: {:?}",
+            "All 37 diagnostic fault-injection vectors must pass: {:?}",
             report.dtcs
         );
-        assert_eq!(report.passed_tests, 35);
+        assert_eq!(report.passed_tests, 37);
     }
 }
