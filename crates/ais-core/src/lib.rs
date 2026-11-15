@@ -37,6 +37,9 @@ pub mod doctor;
 pub use doctor::*;
 
 pub mod cache;
+pub mod scope;
+pub use scope::*;
+
 pub mod churn;
 pub mod dedup;
 pub mod findings;

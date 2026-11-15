@@ -1778,7 +1778,8 @@ pub fn run_ais_doctor_diagnostics(root: &Path) -> AisDoctorReport {
 
         // 2. Injected cross-vendor piggybacking
         let fake_piggybacking = "pub struct BrevoDelivery { pub cfg: SendGridConfig }";
-        let is_piggybacking_caught = fake_piggybacking.contains("Brevo") && fake_piggybacking.contains("SendGridConfig");
+        let is_piggybacking_caught =
+            fake_piggybacking.contains("Brevo") && fake_piggybacking.contains("SendGridConfig");
 
         // 3. Resilient provider chain verification
         let is_chain_sound = {
