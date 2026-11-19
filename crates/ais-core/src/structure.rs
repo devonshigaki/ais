@@ -581,39 +581,87 @@ pub fn remediate_structure(root: &Path) -> (usize, Vec<String>) {
                 let _ = fs::remove_file(entry.path());
                 actions.push(format!("Purged rogue database spill file: {name}"));
             }
-            // 3. Purge leaked test database files across repository
-            for entry in walkdir::WalkDir::new(root)
-                .follow_links(false)
-                .into_iter()
-                .filter_entry(|e| {
-                    let p = e.path().to_string_lossy();
-                    !p.contains("target")
-                        && !p.contains(".git")
-                        && !p.contains("node_modules")
-                        && !p.contains(".freshcredit")
-                        && !p.contains("/data")
-                        && !p.contains("fixtures")
-                })
-                .flatten()
-            {
-                if entry.file_type().is_file() {
-                    let name = entry.file_name().to_string_lossy();
-                    let is_leak = name.ends_with(".db")
-                        || name.ends_with(".sqlite")
-                        || name.ends_with(".sqlite3")
-                        || name.ends_with("-wal")
-                        || name.ends_with("-shm")
-                        || name.contains("DATABASE_URL");
+        }
+    }
 
-                    if is_leak {
-                        let _ = fs::remove_file(entry.path());
-                        actions.push(format!(
-                            "Purged leaked database artifact: {}",
-                            entry.path().display()
-                        ));
-                    }
-                }
+    // 3. Purge leaked test database files across repository (single O(N) walk)
+    for entry in walkdir::WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|e| {
+            let p = e.path().to_string_lossy();
+            !p.contains("target")
+                && !p.contains(".git")
+                && !p.contains("node_modules")
+                && !p.contains(".freshcredit")
+                && !p.contains("/data")
+                && !p.contains("fixtures")
+        })
+        .flatten()
+    {
+        if entry.file_type().is_file() {
+            let name = entry.file_name().to_string_lossy();
+            let is_leak = name.ends_with(".db")
+                || name.ends_with(".sqlite")
+                || name.ends_with(".sqlite3")
+                || name.ends_with("-wal")
+                || name.ends_with("-shm")
+                || name.contains("DATABASE_URL");
+
+            if is_leak {
+                let _ = fs::remove_file(entry.path());
+                actions.push(format!(
+                    "Purged leaked database artifact: {}",
+                    entry.path().display()
+                ));
             }
+        }
+    }
+
+    // 4. Purge stale test database files in OS temp directory (std::env::temp_dir)
+    let tmp_dir = std::env::temp_dir();
+    if let Ok(entries) = fs::read_dir(&tmp_dir) {
+        let mut purged_tmp_count = 0usize;
+        let stale_cutoff = std::time::Duration::from_secs(3600);
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if !p.is_file() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            let is_test_db_or_tmp = (name.starts_with("test_")
+                || name.starts_with("anchor_log_store_")
+                || name.starts_with("sweep_store_")
+                || name.starts_with("fc_vid_")
+                || name.starts_with("plaid_tokens_test_")
+                || name.starts_with("approve_canon_")
+                || name.starts_with("test-upload")
+                || name.starts_with("test-sim-")
+                || name.starts_with("_pandoc_"))
+                && (name.ends_with(".db")
+                    || name.ends_with(".db-wal")
+                    || name.ends_with(".db-shm")
+                    || name.starts_with("test-upload")
+                    || name.starts_with("test-sim-")
+                    || name.starts_with("_pandoc_"));
+            if !is_test_db_or_tmp {
+                continue;
+            }
+            let is_stale = p
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|mtime| std::time::SystemTime::now().duration_since(mtime).ok())
+                .is_some_and(|age| age > stale_cutoff);
+            if is_stale && fs::remove_file(&p).is_ok() {
+                purged_tmp_count += 1;
+            }
+        }
+        if purged_tmp_count > 0 {
+            actions.push(format!(
+                "Purged {purged_tmp_count} stale test artifact(s) from {}",
+                tmp_dir.display()
+            ));
         }
     }
 
