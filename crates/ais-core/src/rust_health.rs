@@ -82,6 +82,32 @@ pub struct RustHealthReport {
     pub unique_dependency_crates: usize,
     /// Normalized defect density (bugs per 1,000 LOC)
     pub defect_density_per_kloc: f64,
+    /// Whether `cargo-audit` binary is installed and available
+    #[serde(default)]
+    pub cargo_audit_available: bool,
+    /// Whether `cargo-geiger` binary is installed and available
+    #[serde(default)]
+    pub cargo_geiger_available: bool,
+    /// Explicit advisory warnings when static/security audit tools are missing
+    #[serde(default)]
+    pub tool_warnings: Vec<String>,
+}
+
+fn is_cargo_subcommand_available(bin_name: &str) -> bool {
+    if let Ok(path_var) = std::env::var("PATH") {
+        for dir in std::env::split_paths(&path_var) {
+            if dir.join(bin_name).is_file() {
+                return true;
+            }
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        let cargo_bin = Path::new(&home).join(".cargo").join("bin").join(bin_name);
+        if cargo_bin.is_file() {
+            return true;
+        }
+    }
+    false
 }
 
 /// Analyze workspace Rust health invariants
@@ -236,6 +262,19 @@ pub fn analyze_workspace_rust_health(
         0.0
     };
 
+    let cargo_audit_available = is_cargo_subcommand_available("cargo-audit");
+    let cargo_geiger_available = is_cargo_subcommand_available("cargo-geiger");
+    let mut tool_warnings = Vec::new();
+    if !cargo_audit_available {
+        tool_warnings
+            .push("cargo-audit not installed; CVE dependency verification degraded".to_string());
+    }
+    if !cargo_geiger_available {
+        tool_warnings.push(
+            "cargo-geiger not installed; transitive unsafe crate verification degraded".to_string(),
+        );
+    }
+
     RustHealthReport {
         production_loc,
         unsafe_blocks,
@@ -247,6 +286,9 @@ pub fn analyze_workspace_rust_health(
         static_dispatch_count,
         unique_dependency_crates,
         defect_density_per_kloc,
+        cargo_audit_available,
+        cargo_geiger_available,
+        tool_warnings,
     }
 }
 

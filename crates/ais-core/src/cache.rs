@@ -87,6 +87,11 @@ pub fn compute_content_hash(s: &str) -> u64 {
 /// Computes a self-invalidating content-addressed fingerprint across ais-core engine source files
 pub fn compute_engine_fingerprint(root: &Path) -> u64 {
     let mut hasher = DefaultHasher::new();
+    env!("CARGO_PKG_VERSION").hash(&mut hasher);
+    include_str!("metrics.rs").hash(&mut hasher);
+    include_str!("cohesion.rs").hash(&mut hasher);
+    include_str!("dedup.rs").hash(&mut hasher);
+    include_str!("entity_isolation.rs").hash(&mut hasher);
     let src_dir = root.join("crates/ais-core/src");
     if let Ok(entries) = std::fs::read_dir(&src_dir) {
         let mut paths: Vec<_> = entries

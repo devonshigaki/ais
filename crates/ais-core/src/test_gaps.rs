@@ -218,16 +218,61 @@ fn is_pure_reexport_facade(content: &str) -> bool {
     true
 }
 
+fn extract_rust_prod_fn_names(prod_content: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    for line in prod_content.lines() {
+        let trimmed = line.trim();
+        let after_vis = trimmed
+            .strip_prefix("pub(crate) ")
+            .or_else(|| trimmed.strip_prefix("pub(super) "))
+            .or_else(|| trimmed.strip_prefix("pub "))
+            .unwrap_or(trimmed);
+        let after_async = after_vis.strip_prefix("async ").unwrap_or(after_vis);
+        let after_const = after_async.strip_prefix("const ").unwrap_or(after_async);
+        let after_unsafe = after_const.strip_prefix("unsafe ").unwrap_or(after_const);
+        if let Some(rest) = after_unsafe.strip_prefix("fn ") {
+            let ident: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            if ident.len() >= 2 {
+                names.push(ident);
+            }
+        }
+    }
+    names
+}
+
+fn extract_rust_inline_test_section(content: &str) -> Option<&str> {
+    content
+        .find("#[cfg(test)]")
+        .or_else(|| content.find("mod tests"))
+        .map(|idx| &content[idx..])
+}
+
 fn rust_file_has_tests(root: &Path, rel_path: &Path, content: &str) -> bool {
     let file_stem = rel_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
 
-    // 1. Direct inline test module or test attribute, or canonical domain re-export facade
-    if content.contains("#[test]")
-        || content.contains("#[tokio::test]")
-        || content.contains("#[cfg(test)]")
-        || content.contains("mod tests")
-        || content.contains("pub use engine_ports::domain::")
-        || is_pure_reexport_facade(content)
+    if content.contains("pub use engine_ports::domain::") || is_pure_reexport_facade(content) {
+        return true;
+    }
+
+    let prod_only = crate::ast::strip_cfg_test_blocks(content);
+    let prod_fns = extract_rust_prod_fn_names(&prod_only);
+
+    if let Some(inline_tests) = extract_rust_inline_test_section(content) {
+        if prod_fns.len() <= 2 {
+            return true;
+        }
+        let covered = prod_fns
+            .iter()
+            .filter(|fn_name| inline_tests.contains(fn_name.as_str()))
+            .count();
+        if covered * 2 >= prod_fns.len() {
+            return true;
+        }
+    } else if (content.contains("#[test]") || content.contains("#[tokio::test]"))
+        && prod_fns.len() <= 2
     {
         return true;
     }
@@ -638,6 +683,8 @@ fn ts_js_file_has_tests(root: &Path, rel_path: &Path, content: &str) -> bool {
                     || name.ends_with(".spec.tsx")
                     || name.ends_with(".test.js")
                     || name.ends_with(".spec.js")
+                    || name.ends_with(".test.mjs")
+                    || name.ends_with(".spec.mjs")
                 {
                     if let Some(c) = get_cached_test_content(&entry.path()) {
                         let code = strip_js_comments(&c);
@@ -667,6 +714,8 @@ fn ts_js_file_has_tests(root: &Path, rel_path: &Path, content: &str) -> bool {
             ".test.jsx",
             ".spec.js",
             ".spec.jsx",
+            ".test.mjs",
+            ".spec.mjs",
         ];
         for ext in test_exts {
             let sibling = parent.join(format!("{file_stem}{ext}"));
@@ -1137,6 +1186,54 @@ mod tests {
         let _ = std::fs::write(&test_file, "describe('reports', () => {});");
 
         assert!(file_has_tests(&temp, Path::new("reports.ts"), content));
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn test_monolith_with_single_trivial_helper_test_is_flagged_as_gap() {
+        let root = Path::new(".");
+        let rel_path = Path::new("src/monolith_verify.rs");
+        let content = r#"
+pub fn run_verification() {}
+fn check_workloads() {}
+fn check_postgres() {}
+fn check_ingress() {}
+fn check_security() {}
+fn check_vault() {}
+fn parse_helper() {}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn tests_only_one_helper() {
+        parse_helper();
+    }
+}
+"#;
+        assert!(!file_has_tests(root, rel_path, content));
+    }
+
+    #[test]
+    fn test_mjs_file_has_tests_sibling_detection() {
+        let temp = std::env::temp_dir().join("ais_test_mjs_sibling_detect");
+        let _ = std::fs::remove_dir_all(&temp);
+        std::fs::create_dir_all(&temp).unwrap();
+        std::fs::write(
+            temp.join("failover-worker.js"),
+            "export default { async fetch(request, env) { return new Response('ok'); } };",
+        )
+        .unwrap();
+        std::fs::write(
+            temp.join("failover-worker.test.mjs"),
+            "import test from 'node:test';\ntest('failover-worker rejects stale epoch', () => {});",
+        )
+        .unwrap();
+        let content = std::fs::read_to_string(temp.join("failover-worker.js")).unwrap();
+        assert!(file_has_tests(
+            &temp,
+            Path::new("failover-worker.js"),
+            &content
+        ));
         let _ = std::fs::remove_dir_all(&temp);
     }
 }

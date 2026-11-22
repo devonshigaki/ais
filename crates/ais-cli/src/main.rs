@@ -99,6 +99,11 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Audit legal-entity isolation boundaries (BND-ENT-001..004)
+    EntityIsolation {
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -126,6 +131,7 @@ fn main() -> ExitCode {
         Commands::Init { force } => run_init(&root, force),
         Commands::CoverageBleed { json } => run_coverage_bleed(&root, json),
         Commands::Doctor { json } => run_doctor(&root, json),
+        Commands::EntityIsolation { json } => run_entity_isolation(&root, json),
     }
 }
 
@@ -316,6 +322,22 @@ fn run_architecture(root: &Path, json: bool) -> ExitCode {
         "  • Defect Density (per KLOC):   {:.2} bugs/KLOC",
         rust_health.defect_density_per_kloc
     );
+    println!(
+        "  • Security Tooling:            cargo-audit={}, cargo-geiger={}",
+        if rust_health.cargo_audit_available {
+            "ok"
+        } else {
+            "MISSING"
+        },
+        if rust_health.cargo_geiger_available {
+            "ok"
+        } else {
+            "MISSING"
+        }
+    );
+    for w in &rust_health.tool_warnings {
+        println!("  ⚠️  TOOL GAP: {w}");
+    }
 
     ExitCode::SUCCESS
 }
@@ -604,10 +626,57 @@ fn run_scan(root: &Path, json: bool) -> ExitCode {
     }
 
     if fmt_ok && comp_ok && audit_ok && pot_ok && taint_ok && recon_ok {
+        let ent_findings = ais_core::scan_entity_isolation(root);
+        if !ent_findings.is_empty() {
+            eprintln!(
+                "\n🛑 AIS SCAN FAILED: {} legal-entity isolation violation(s):",
+                ent_findings.len()
+            );
+            for f in &ent_findings {
+                eprintln!(
+                    "    - [{}] {}: {}",
+                    f.rule_code,
+                    f.file.display(),
+                    f.message
+                );
+            }
+            return ExitCode::FAILURE;
+        }
         println!("\n✅ Incremental AST & compliance scan completed with zero regression blocks.");
         ExitCode::SUCCESS
     } else {
         eprintln!("\n🛑 AIS SCAN FAILED: Violations detected across quality dimensions.");
+        ExitCode::FAILURE
+    }
+}
+
+fn run_entity_isolation(root: &Path, json: bool) -> ExitCode {
+    let findings = ais_core::scan_entity_isolation(root);
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&findings).unwrap_or_default()
+        );
+    } else if findings.is_empty() {
+        println!("✅ ENTITY ISOLATION: 0 cross-entity leaks detected (BND-ENT-001..004).");
+    } else {
+        eprintln!(
+            "❌ ENTITY ISOLATION VIOLATIONS ({} finding(s)):",
+            findings.len()
+        );
+        for f in &findings {
+            eprintln!(
+                "  - [{}] {}:{} — {}",
+                f.rule_code,
+                f.file.display(),
+                f.line,
+                f.message
+            );
+        }
+    }
+    if findings.is_empty() {
+        ExitCode::SUCCESS
+    } else {
         ExitCode::FAILURE
     }
 }

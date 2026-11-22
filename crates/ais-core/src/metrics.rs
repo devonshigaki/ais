@@ -380,6 +380,87 @@ fn count_functions(content: &str, ext: &str) -> usize {
     }
 }
 
+fn is_brace_fn_start(trimmed: &str, ext: &str) -> bool {
+    if ext == "rs" {
+        return (trimmed.starts_with("fn ")
+            || trimmed.starts_with("pub fn ")
+            || trimmed.starts_with("pub async fn ")
+            || trimmed.starts_with("pub(crate) fn ")
+            || trimmed.starts_with("pub(crate) async fn ")
+            || trimmed.starts_with("pub(super) fn ")
+            || trimmed.starts_with("async fn ")
+            || trimmed.starts_with("unsafe fn ")
+            || trimmed.starts_with("const fn "))
+            && !trimmed.ends_with(';');
+    }
+    if ext == "kt" || ext == "kts" {
+        return trimmed.contains("fun ") && trimmed.contains('{');
+    }
+    if ext == "swift" {
+        return trimmed.contains("func ") && trimmed.contains('{');
+    }
+    if matches!(ext, "ts" | "tsx" | "js" | "jsx" | "mjs") {
+        return (trimmed.contains("function ") || trimmed.contains("=> {"))
+            && trimmed.contains('{');
+    }
+    false
+}
+
+pub fn compute_max_function_metrics(content: &str, ext: &str) -> Option<(usize, usize)> {
+    if !matches!(
+        ext,
+        "rs" | "ts" | "tsx" | "js" | "jsx" | "mjs" | "kt" | "kts" | "swift"
+    ) {
+        return None;
+    }
+    let mut in_fn = false;
+    let mut depth: i32 = 0;
+    let mut seen_brace = false;
+    let mut cur_lines: Vec<&str> = Vec::new();
+    let mut max_ccn = 0usize;
+    let mut max_loc = 0usize;
+    let mut found = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if !in_fn && is_brace_fn_start(trimmed, ext) {
+            in_fn = true;
+            depth = 0;
+            seen_brace = false;
+            cur_lines.clear();
+        }
+        if in_fn {
+            cur_lines.push(line);
+            for ch in trimmed.chars() {
+                if ch == '{' {
+                    depth += 1;
+                    seen_brace = true;
+                } else if ch == '}' {
+                    depth -= 1;
+                }
+            }
+            if !seen_brace && trimmed.ends_with(';') {
+                in_fn = false;
+                cur_lines.clear();
+            } else if seen_brace && depth <= 0 {
+                let body = cur_lines.join("\n");
+                let ccn = compute_ccn(&body);
+                let loc = cur_lines.iter().filter(|l| !l.trim().is_empty()).count();
+                max_ccn = max_ccn.max(ccn);
+                max_loc = max_loc.max(loc);
+                found = true;
+                in_fn = false;
+                cur_lines.clear();
+            }
+        }
+    }
+    if found {
+        Some((max_ccn, max_loc))
+    } else {
+        None
+    }
+}
+
 pub fn analyze_file_metrics(path: &Path) -> Option<(usize, f64, usize)> {
     if !is_scannable_source_file(path) {
         return None;
@@ -401,14 +482,15 @@ pub fn analyze_file_metrics(path: &Path) -> Option<(usize, f64, usize)> {
     let ccn = compute_ccn(&eval_content);
     let raw_routines = count_functions(&eval_content, ext);
     let effective_routines = if raw_routines > 0 {
-        // Invariant: Power of Ten Rule 4 bounds routines to <= 60 LOC, with cohesive routines averaging ~25 LOC.
-        // A modular file of N lines contains at least ceil(N/25) functional, helper, or declarative units.
-        raw_routines.max(loc.div_ceil(25)).max(1)
+        raw_routines.max(1)
     } else {
         loc.div_ceil(25).max(1)
     };
     let avg_loc = (loc / effective_routines).max(1);
-    let fn_ccn = (ccn / effective_routines).max(1);
+    let avg_ccn = (ccn / effective_routines).max(1);
+    let fn_ccn = compute_max_function_metrics(&eval_content, ext)
+        .map(|(m_ccn, _)| m_ccn.max(avg_ccn))
+        .unwrap_or(avg_ccn);
     let mi = compute_maintainability_index(fn_ccn, avg_loc);
     Some((fn_ccn, mi, loc))
 }
@@ -474,12 +556,15 @@ pub fn scan_codebase_metrics(root: &Path) -> QualityMetricsReport {
             let ccn = compute_ccn(&eval_content);
             let raw_routines = count_functions(&eval_content, ext);
             let effective_routines = if raw_routines > 0 {
-                raw_routines.max(loc.div_ceil(25)).max(1)
+                raw_routines.max(1)
             } else {
                 loc.div_ceil(25).max(1)
             };
             let avg_loc = (loc / effective_routines).max(1);
-            let fn_ccn = (ccn / effective_routines).max(1);
+            let avg_ccn = (ccn / effective_routines).max(1);
+            let fn_ccn = compute_max_function_metrics(&eval_content, ext)
+                .map(|(m_ccn, _)| m_ccn.max(avg_ccn))
+                .unwrap_or(avg_ccn);
             let mi = compute_maintainability_index(fn_ccn, avg_loc);
 
             Some((rel_path, rel_str, hash, fn_ccn, mi, loc))
@@ -593,5 +678,17 @@ mod tests {
     fn test_compute_maintainability_index_zero_loc() {
         let mi = compute_maintainability_index(1, 0);
         assert_eq!(mi, 100.0);
+    }
+
+    #[test]
+    fn test_monolith_function_ccn_not_diluted() {
+        let mut src =
+            String::from("fn tiny() {}\nfn monolith(x: i32) -> i32 {\n    let mut acc = 0;\n");
+        for i in 0..25 {
+            src.push_str(&format!("    if x == {i} {{ acc += {i}; }}\n"));
+        }
+        src.push_str("    acc\n}\n");
+        let (max_ccn, _max_loc) = compute_max_function_metrics(&src, "rs").unwrap();
+        assert!(max_ccn >= 26, "expected monolith CCN >= 26, got {max_ccn}");
     }
 }

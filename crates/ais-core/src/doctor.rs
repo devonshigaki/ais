@@ -1921,6 +1921,54 @@ pub fn run_ais_doctor_diagnostics(root: &Path) -> AisDoctorReport {
         ));
     }
 
+    // 39. DTC-AIS-039: Legal-Entity Boundary Isolation Watchman (BND-ENT-001..004)
+    {
+        let bad_rc = "<?php\n$config['skin'] = 'freshcredit';\n$config['username_domain'] = ['freshcredit.com' => 'FC', 'zaplit.com' => 'Zaplit'];\n";
+        let good_rc = "<?php\n$config['use_https'] = true;\n$config['skin'] = 'zaplit';\n$config['username_domain'] = 'zaplit.com';\n";
+        let bad_pf = "hudson@freshcredit.xyz hudson.schenck@freshcredit.com\n";
+        let good_pf = "hudson@freshcredit.xyz hello@freshcredit.xyz\n";
+
+        let tp_rc = !crate::entity_isolation::check_roundcube_config_content(
+            Path::new("zz-bad.php"),
+            bad_rc,
+        )
+        .is_empty();
+        let tn_rc = crate::entity_isolation::check_roundcube_config_content(
+            Path::new("zz-good.php"),
+            good_rc,
+        )
+        .is_empty();
+        let tp_pf = !crate::entity_isolation::check_postfix_virtual_content(
+            Path::new("postfix-virtual.cf"),
+            bad_pf,
+        )
+        .is_empty();
+        let tn_pf = crate::entity_isolation::check_postfix_virtual_content(
+            Path::new("postfix-virtual.cf"),
+            good_pf,
+        )
+        .is_empty();
+        let tripped = tp_rc && tn_rc && tp_pf && tn_pf;
+
+        report.total_tests += 1;
+        if tripped {
+            report.passed_tests += 1;
+        } else {
+            report.failed_tests += 1;
+        }
+        report.dtcs.push(DiagnosticTroubleCode::new(
+            "DTC-AIS-039",
+            "Legal-Entity Boundary Isolation Watchman",
+            "Asserts BND-ENT-001..004 intercept cross-entity webmail dropdowns/cookies and Postfix virtual alias leaks",
+            !tripped,
+            if tripped {
+                "BND-ENT-001..004 entity isolation watchman verified".to_string()
+            } else {
+                "Entity isolation boundary scanner blind to sabotage".to_string()
+            },
+        ));
+    }
+
     report
 }
 
@@ -1934,9 +1982,9 @@ mod tests {
         let report = run_ais_doctor_diagnostics(root);
         assert_eq!(
             report.failed_tests, 0,
-            "All 38 diagnostic fault-injection vectors must pass: {:?}",
+            "All 39 diagnostic fault-injection vectors must pass: {:?}",
             report.dtcs
         );
-        assert_eq!(report.passed_tests, 38);
+        assert_eq!(report.passed_tests, 39);
     }
 }

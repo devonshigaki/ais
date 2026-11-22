@@ -35,6 +35,8 @@ pub mod coverage_bleed;
 pub use coverage_bleed::*;
 pub mod doctor;
 pub use doctor::*;
+pub mod entity_isolation;
+pub use entity_isolation::*;
 
 pub mod cache;
 pub mod scope;
