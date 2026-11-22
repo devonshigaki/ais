@@ -4,12 +4,12 @@
 //! Traefik routers, and Cloudflare edge workers for cross-entity leakage.
 
 use crate::findings::{Confidence, Finding, Severity};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 use walkdir::WalkDir;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LegalEntity {
     FreshCreditInc,
     FreshCreditOrg,
@@ -30,6 +30,60 @@ pub fn domain_legal_entity(domain: &str) -> Option<LegalEntity> {
         "tism.ing" | "devonshigaki.com" => Some(LegalEntity::DevonPersonal),
         _ => None,
     }
+}
+
+pub fn host_legal_entity(host: &str) -> Option<LegalEntity> {
+    let mut current = host
+        .trim()
+        .trim_matches(|c| matches!(c, '`' | '"' | '\''))
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    while !current.is_empty() {
+        if let Some(ent) = domain_legal_entity(&current) {
+            return Some(ent);
+        }
+        let Some((_, rest)) = current.split_once('.') else {
+            break;
+        };
+        current = rest.to_string();
+    }
+    None
+}
+
+fn service_namespace_legal_entity(url: &str) -> Option<LegalEntity> {
+    let before_svc = url.split(".svc.cluster.local").next()?;
+    let ns = before_svc.rsplit('.').next()?.trim();
+    match ns {
+        "freshcredit" => Some(LegalEntity::FreshCreditInc),
+        "freshcredit-org" => Some(LegalEntity::FreshCreditOrg),
+        "freshcredit-xyz" => Some(LegalEntity::FreshCreditXyz),
+        "zaplit" => Some(LegalEntity::ZaplitInc),
+        "personal-tism" => Some(LegalEntity::DevonPersonal),
+        _ => None,
+    }
+}
+
+fn extract_traefik_rule_hosts(rule: &str) -> Vec<String> {
+    let mut hosts = Vec::new();
+    let mut rest = rule;
+    while let Some(pos) = rest.find("Host(") {
+        let after = &rest[pos + 5..];
+        let Some(end) = after.find(')') else {
+            break;
+        };
+        let inner = &after[..end];
+        for raw in inner.split(',') {
+            let cleaned = raw
+                .trim()
+                .trim_matches(|c| matches!(c, '`' | '"' | '\'' | ' '))
+                .to_ascii_lowercase();
+            if !cleaned.is_empty() {
+                hosts.push(cleaned);
+            }
+        }
+        rest = &after[end + 1..];
+    }
+    hosts
 }
 
 pub fn check_roundcube_config_content(path: &Path, content: &str) -> Vec<Finding> {
@@ -196,23 +250,183 @@ fn check_documenso_k8s_isolation(path: &Path, content: &str) -> Vec<Finding> {
     findings
 }
 
-fn check_traefik_and_worker(path: &Path, content: &str) -> Vec<Finding> {
+fn parse_traefik_service_entities(content: &str) -> HashMap<String, LegalEntity> {
+    let mut service_entities = HashMap::new();
+    let mut in_services = false;
+    let mut cur_svc: Option<String> = None;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if line.starts_with("  services:") {
+            in_services = true;
+            cur_svc = None;
+            continue;
+        } else if line.starts_with("  routers:") || !line.starts_with(' ') {
+            in_services = false;
+            cur_svc = None;
+            continue;
+        }
+        if !in_services {
+            continue;
+        }
+        let indent = line.len() - line.trim_start().len();
+        if indent == 4 && trimmed.ends_with(':') {
+            cur_svc = Some(trimmed.trim_end_matches(':').to_string());
+        } else if let (Some(ref svc), Some(url_raw)) = (&cur_svc, trimmed.strip_prefix("- url:")) {
+            let url = url_raw.trim().trim_matches('"').trim_matches('\'');
+            if let Some(ent) = service_namespace_legal_entity(url) {
+                service_entities.insert(svc.clone(), ent);
+            }
+        }
+    }
+    service_entities
+}
+
+#[derive(Default)]
+struct TraefikRouterInfo {
+    name: String,
+    line_num: usize,
+    hosts: Vec<String>,
+    service: Option<String>,
+}
+
+fn parse_traefik_routers(content: &str) -> Vec<TraefikRouterInfo> {
+    let mut routers = Vec::new();
+    let mut in_routers = false;
+    let mut in_tls_domains = false;
+    let mut in_sans = false;
+    let mut current: Option<TraefikRouterInfo> = None;
+
+    for (idx, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if line.starts_with("  routers:") {
+            in_routers = true;
+            in_tls_domains = false;
+            in_sans = false;
+            continue;
+        } else if line.starts_with("  services:") || !line.starts_with(' ') {
+            if let Some(r) = current.take() {
+                routers.push(r);
+            }
+            in_routers = false;
+            in_tls_domains = false;
+            in_sans = false;
+            continue;
+        }
+        if !in_routers {
+            continue;
+        }
+        let indent = line.len() - line.trim_start().len();
+        if indent == 4 && trimmed.ends_with(':') {
+            if let Some(r) = current.take() {
+                routers.push(r);
+            }
+            current = Some(TraefikRouterInfo {
+                name: trimmed.trim_end_matches(':').to_string(),
+                line_num: idx + 1,
+                ..Default::default()
+            });
+            in_tls_domains = false;
+            in_sans = false;
+            continue;
+        }
+        let Some(ref mut r) = current else {
+            continue;
+        };
+        if let Some(rule_val) = trimmed.strip_prefix("rule:") {
+            r.hosts.extend(extract_traefik_rule_hosts(rule_val));
+        } else if let Some(svc_val) = trimmed.strip_prefix("service:") {
+            r.service = Some(
+                svc_val
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'')
+                    .to_string(),
+            );
+        } else if trimmed == "domains:" {
+            in_tls_domains = true;
+            in_sans = false;
+        } else if in_tls_domains {
+            if let Some(main_val) = trimmed.strip_prefix("- main:") {
+                in_sans = false;
+                let dom = main_val.trim().trim_matches('"').trim_matches('\'');
+                if !dom.is_empty() {
+                    r.hosts.push(dom.to_string());
+                }
+            } else if trimmed == "sans:" {
+                in_sans = true;
+            } else if in_sans && trimmed.starts_with("- ") {
+                let dom = trimmed
+                    .trim_start_matches("- ")
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'');
+                if !dom.is_empty() {
+                    r.hosts.push(dom.to_string());
+                }
+            } else if indent <= 6 {
+                in_tls_domains = false;
+                in_sans = false;
+            }
+        }
+    }
+    if let Some(r) = current.take() {
+        routers.push(r);
+    }
+    routers
+}
+pub fn check_traefik_and_worker(path: &Path, content: &str) -> Vec<Finding> {
     let mut findings = Vec::new();
     let fname = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
     if fname == "dynamic-k8s.yml" {
-        if let Some(idx) = content.find("webmail-https:") {
-            let block = &content[idx..content.len().min(idx + 1200)];
-            if block.contains("webmail.freshcredit.com") && block.contains("webmail.zaplit.com") {
+        let service_entities = parse_traefik_service_entities(content);
+        for r in parse_traefik_routers(content) {
+            let mut router_entities: HashSet<LegalEntity> = HashSet::new();
+            for h in &r.hosts {
+                if let Some(ent) = host_legal_entity(h) {
+                    router_entities.insert(ent);
+                }
+            }
+            if router_entities.len() > 1 {
                 findings.push(
                     Finding::new(
                         "BND-ENT-004",
-                        Severity::High,
-                        "Traefik `webmail-https` router mixes FreshCredit and Zaplit SANs in one TLS cert",
+                        Severity::Critical,
+                        format!(
+                            "Traefik router `{}` mixes hosts from multiple legal entities ({:?})",
+                            r.name, router_entities
+                        ),
                         path.to_path_buf(),
-                        1,
+                        r.line_num,
                     )
-                    .with_confidence(Confidence::new(0.96)),
+                    .with_confidence(Confidence::new(0.98)),
                 );
+            } else if let (Some(&host_ent), Some(ref svc_name)) =
+                (router_entities.iter().next(), &r.service)
+            {
+                if let Some(&svc_ent) = service_entities.get(svc_name) {
+                    if svc_ent != host_ent {
+                        findings.push(
+                            Finding::new(
+                                "BND-ENT-004",
+                                Severity::Critical,
+                                format!(
+                                    "Traefik router `{}` routes {:?} host(s) to `{svc_name}` in {:?} namespace",
+                                    r.name, host_ent, svc_ent
+                                ),
+                                path.to_path_buf(),
+                                r.line_num,
+                            )
+                            .with_confidence(Confidence::new(0.98)),
+                        );
+                    }
+                }
             }
         }
     } else if fname == "failover-worker.js"

@@ -1969,6 +1969,78 @@ pub fn run_ais_doctor_diagnostics(root: &Path) -> AisDoctorReport {
         ));
     }
 
+    // 40. DTC-AIS-040: Traefik Router Host() & Backend Service Namespace Isolation Watchman
+    {
+        let bad_router_mix = r#"http:
+  routers:
+    zaplit-com-http:
+      rule: "Host(`zaplit.com`) || Host(`beta-zaplit.freshcredit.com`)"
+      service: "zaplit-com"
+  services:
+    zaplit-com:
+      loadBalancer:
+        servers:
+          - url: "http://zaplit-com.zaplit.svc.cluster.local.:8080"
+"#;
+        let bad_ns_mismatch = r#"http:
+  routers:
+    vote-com-https:
+      rule: "Host(`vote.freshcredit.com`)"
+      service: "vote"
+  services:
+    vote:
+      loadBalancer:
+        servers:
+          - url: "http://freshcredit-vote.freshcredit-xyz.svc.cluster.local.:3001"
+"#;
+        let good_traefik = r#"http:
+  routers:
+    vote-com-https:
+      rule: "Host(`vote.freshcredit.com`)"
+      service: "vote-com"
+  services:
+    vote-com:
+      loadBalancer:
+        servers:
+          - url: "http://freshcredit-vote.freshcredit.svc.cluster.local.:3001"
+"#;
+
+        let tp_mix = !crate::entity_isolation::check_traefik_and_worker(
+            Path::new("dynamic-k8s.yml"),
+            bad_router_mix,
+        )
+        .is_empty();
+        let tp_ns = !crate::entity_isolation::check_traefik_and_worker(
+            Path::new("dynamic-k8s.yml"),
+            bad_ns_mismatch,
+        )
+        .is_empty();
+        let tn_ok = crate::entity_isolation::check_traefik_and_worker(
+            Path::new("dynamic-k8s.yml"),
+            good_traefik,
+        )
+        .is_empty();
+        let tripped = tp_mix && tp_ns && tn_ok;
+
+        report.total_tests += 1;
+        if tripped {
+            report.passed_tests += 1;
+        } else {
+            report.failed_tests += 1;
+        }
+        report.dtcs.push(DiagnosticTroubleCode::new(
+            "DTC-AIS-040",
+            "Traefik Router Host & Backend Namespace Isolation Watchman",
+            "Asserts BND-ENT-004 catches cross-entity Host() rules and cross-namespace K8s service routing",
+            !tripped,
+            if tripped {
+                "BND-ENT-004 Traefik Host() & namespace watchman verified".to_string()
+            } else {
+                "BND-ENT-004 Traefik router/namespace watchman blind".to_string()
+            },
+        ));
+    }
+
     report
 }
 
@@ -1982,9 +2054,9 @@ mod tests {
         let report = run_ais_doctor_diagnostics(root);
         assert_eq!(
             report.failed_tests, 0,
-            "All 39 diagnostic fault-injection vectors must pass: {:?}",
+            "All 40 diagnostic fault-injection vectors must pass: {:?}",
             report.dtcs
         );
-        assert_eq!(report.passed_tests, 39);
+        assert_eq!(report.passed_tests, 40);
     }
 }
