@@ -1,7 +1,7 @@
-//! Legal-Entity Isolation Boundary Scanner (BND-ENT-001..004)
+//! Legal-Entity Isolation Boundary Scanner (BND-ENT-001..007)
 //!
 //! Statically audits webmail, Postfix alias routing, Documenso K8s deployments,
-//! Traefik routers, and Cloudflare edge workers for cross-entity leakage.
+//! Traefik routers, Cloudflare edge workers, and entity ServiceAccount / fencing isolation.
 
 use crate::findings::{Confidence, Finding, Severity};
 use std::collections::{HashMap, HashSet};
@@ -446,6 +446,84 @@ pub fn check_traefik_and_worker(path: &Path, content: &str) -> Vec<Finding> {
     findings
 }
 
+/// Audits Prometheus config (`09-prometheus.yaml`) for legal_entity chargeback labeling (`BND-ENT-005`).
+pub fn check_prometheus_entity_attribution(path: &Path, content: &str) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    if content.contains("entity:memory_rss_bytes:sum") {
+        if !content.contains("target_label: legal_entity") {
+            findings.push(
+                Finding::new(
+                    "BND-ENT-005",
+                    Severity::High,
+                    "Prometheus k3s-cadvisor scrape lacks `target_label: legal_entity` mapping for namespace chargeback",
+                    path.to_path_buf(),
+                    1,
+                )
+                .with_confidence(Confidence::new(0.95)),
+            );
+        }
+        if content.contains("sum by (namespace) (") {
+            findings.push(
+                Finding::new(
+                    "BND-ENT-005",
+                    Severity::High,
+                    "Prometheus `entity:*` recording rule aggregates `by (namespace)` without `legal_entity` label",
+                    path.to_path_buf(),
+                    1,
+                )
+                .with_confidence(Confidence::new(0.95)),
+            );
+        }
+    }
+    findings
+}
+
+/// Audits multi-entity DR backup, RPO/WAL streaming, and restore verification scripts (`BND-ENT-006`).
+pub fn check_multi_entity_dr_parity(infra_dir: &Path) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    let scripts_dir = infra_dir.join("scripts");
+    let unified_path = scripts_dir.join("unified_dr_backup.sh");
+    if let Ok(unified) = fs::read_to_string(&unified_path) {
+        if unified.contains("freshcredit_xyz_vote_data") {
+            for rpo_script in ["rpo_hourly_db_sync.sh", "wal_stream_push.sh"] {
+                let p = scripts_dir.join(rpo_script);
+                if let Ok(txt) = fs::read_to_string(&p) {
+                    if !txt.contains("freshcredit_xyz_vote_data") {
+                        findings.push(
+                            Finding::new(
+                                "BND-ENT-006",
+                                Severity::High,
+                                format!("{rpo_script} omits `freshcredit_xyz_vote_data` (FreshCredit.xyz LLC RPO gap)"),
+                                p,
+                                1,
+                            )
+                            .with_confidence(Confidence::new(0.95)),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    let verify_path = scripts_dir.join("verify_dr_restore.sh");
+    if let Ok(verify_txt) = fs::read_to_string(&verify_path) {
+        for db in ["documenso_org", "documenso_tism", "documenso_xyz"] {
+            if !verify_txt.contains(db) {
+                findings.push(
+                    Finding::new(
+                        "BND-ENT-006",
+                        Severity::High,
+                        format!("verify_dr_restore.sh omits PostgreSQL entity database `{db}`"),
+                        verify_path.clone(),
+                        1,
+                    )
+                    .with_confidence(Confidence::new(0.95)),
+                );
+            }
+        }
+    }
+    findings
+}
+
 /// Scans `root` for legal-entity isolation violations across mail, K8s, and edge configs.
 #[must_use]
 pub fn scan_entity_isolation(root: &Path) -> Vec<Finding> {
@@ -484,6 +562,9 @@ pub fn scan_entity_isolation(root: &Path) -> Vec<Finding> {
             findings.extend(check_postfix_virtual_content(p, &content));
         } else if s.contains("/infra/k8s/") && s.ends_with(".yaml") {
             findings.extend(check_documenso_k8s_isolation(p, &content));
+            if p.file_name().and_then(|n| n.to_str()) == Some("09-prometheus.yaml") {
+                findings.extend(check_prometheus_entity_attribution(p, &content));
+            }
         } else if p.file_name().and_then(|n| n.to_str()) == Some("dynamic-k8s.yml")
             || p.file_name().and_then(|n| n.to_str()) == Some("failover-worker.js")
         {
@@ -491,6 +572,88 @@ pub fn scan_entity_isolation(root: &Path) -> Vec<Finding> {
         }
     }
 
+    findings.extend(check_multi_entity_dr_parity(&infra_dir));
+    findings.extend(check_entity_sa_and_fence_isolation(root));
+    findings
+}
+
+/// BND-ENT-007: Verifies entity namespaces disable default SA token automount and
+/// split-brain write fencing scales stateful workloads across all entity namespaces.
+pub fn check_entity_sa_and_fence_isolation(root: &Path) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    let ns_yaml = root.join("infra/k8s/00-namespace.yaml");
+    if let Ok(content) = fs::read_to_string(&ns_yaml) {
+        findings.extend(check_namespace_sa_automount_content(&ns_yaml, &content));
+    }
+    let psi_rs = root.join("crates/shigaki-srv/src/psi.rs");
+    if let Ok(content) = fs::read_to_string(&psi_rs) {
+        findings.extend(check_multi_entity_fence_coverage(&psi_rs, &content));
+    }
+    findings
+}
+
+pub fn check_namespace_sa_automount_content(path: &Path, content: &str) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    let entity_namespaces = [
+        "freshcredit",
+        "zaplit",
+        "freshcredit-org",
+        "freshcredit-xyz",
+        "personal-tism",
+    ];
+    let docs: Vec<&str> = content.split("\n---").collect();
+    for ns in entity_namespaces {
+        let has_disabled_default = docs.iter().any(|doc| {
+            doc.contains("kind: ServiceAccount")
+                && doc.contains("name: default")
+                && doc.contains(&format!("namespace: {ns}"))
+                && doc.contains("automountServiceAccountToken: false")
+        });
+        if !has_disabled_default {
+            findings.push(
+                Finding::new(
+                    "BND-ENT-007",
+                    Severity::High,
+                    format!(
+                        "Namespace `{ns}` default ServiceAccount missing `automountServiceAccountToken: false`"
+                    ),
+                    path.to_path_buf(),
+                    1,
+                )
+                .with_confidence(Confidence::new(0.95)),
+            );
+        }
+    }
+    findings
+}
+
+pub fn check_multi_entity_fence_coverage(path: &Path, content: &str) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    if !content.contains("fn k8s_fence_deployments") {
+        return findings;
+    }
+    let required = [
+        ("freshcredit-xyz", "freshcredit-vote"),
+        ("freshcredit-org", "freshcredit-sign-org"),
+        ("freshcredit-xyz", "freshcredit-sign-xyz"),
+        ("personal-tism", "tism-sign"),
+    ];
+    for (ns, dep) in required {
+        if !content.contains(ns) || !content.contains(dep) {
+            findings.push(
+                Finding::new(
+                    "BND-ENT-007",
+                    Severity::Critical,
+                    format!(
+                        "Split-brain write fence omits stateful entity deployment `{ns}/{dep}`"
+                    ),
+                    path.to_path_buf(),
+                    1,
+                )
+                .with_confidence(Confidence::new(0.96)),
+            );
+        }
+    }
     findings
 }
 
@@ -530,5 +693,18 @@ mod tests {
         );
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].rule_code, "BND-ENT-001");
+    }
+
+    #[test]
+    fn detects_prometheus_missing_legal_entity_attribution() {
+        let bad = "- record: entity:memory_rss_bytes:sum\n  expr: sum by (namespace) (container_memory_rss{})\n";
+        let f = check_prometheus_entity_attribution(Path::new("09-prometheus.yaml"), bad);
+        assert_eq!(f.len(), 2);
+        assert!(f.iter().all(|x| x.rule_code == "BND-ENT-005"));
+
+        let good = "target_label: legal_entity\n- record: entity:memory_rss_bytes:sum\n  expr: sum by (namespace, legal_entity) (container_memory_rss{})\n";
+        assert!(
+            check_prometheus_entity_attribution(Path::new("09-prometheus.yaml"), good).is_empty()
+        );
     }
 }

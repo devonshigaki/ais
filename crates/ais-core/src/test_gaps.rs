@@ -261,14 +261,20 @@ fn rust_file_has_tests(root: &Path, rel_path: &Path, content: &str) -> bool {
     let prod_fns = extract_rust_prod_fn_names(&prod_only);
 
     if let Some(inline_tests) = extract_rust_inline_test_section(content) {
-        if prod_fns.len() <= 2 {
-            return true;
-        }
+        let inline_test_fns =
+            inline_tests.matches("#[test").count() + inline_tests.matches("#[tokio::test").count();
+        let has_assertions = inline_tests.contains("assert");
         let covered = prod_fns
             .iter()
             .filter(|fn_name| inline_tests.contains(fn_name.as_str()))
             .count();
-        if covered * 2 >= prod_fns.len() {
+        if prod_fns.len() <= 2 {
+            return true;
+        }
+        if inline_test_fns >= 2 && has_assertions && covered >= 1 {
+            return true;
+        }
+        if covered * 2 >= prod_fns.len() && inline_test_fns >= 1 {
             return true;
         }
     } else if (content.contains("#[test]") || content.contains("#[tokio::test]"))
@@ -1211,6 +1217,36 @@ mod tests {
 }
 "#;
         assert!(!file_has_tests(root, rel_path, content));
+    }
+
+    #[test]
+    fn test_module_with_multiple_asserted_inline_tests_is_covered() {
+        let root = Path::new(".");
+        let rel_path = Path::new("src/ebpf_trace.rs");
+        let content = r#"
+pub fn init_ebpf_tracing() {}
+pub fn spawn_ring_consumer() {}
+fn collect_protected_vmswap_bytes() {}
+fn collect_slice_memory_stats() {}
+fn collect_slice_memory_events() {}
+fn write_ebpf_prom_metrics() {}
+fn parse_proc_status_vmswap_bytes(s: &str) -> usize { s.len() }
+fn parse_vmstat_metric(s: &str) -> u64 { s.len() as u64 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn parses_vmswap() {
+        assert_eq!(parse_proc_status_vmswap_bytes("abc"), 3);
+    }
+    #[test]
+    fn parses_vmstat() {
+        assert_eq!(parse_vmstat_metric("ab"), 2);
+    }
+}
+"#;
+        assert!(file_has_tests(root, rel_path, content));
     }
 
     #[test]

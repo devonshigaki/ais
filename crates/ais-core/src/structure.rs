@@ -512,6 +512,32 @@ pub fn check_unauthorized_scripts(root: &Path, findings: &mut Vec<Finding>) -> u
                 hint: Some("Migrate script logic into a cargo xtask subcommand or delete obsolete file".to_string()),
             });
         }
+        if entry.file_type().is_file() && p.ends_with(".sh") {
+            let fname = entry.file_name().to_str().unwrap_or("");
+            let is_container_or_k3s_hook = matches!(
+                fname,
+                "entrypoint.sh" | "user-patches.sh" | "k3s-killall.sh" | "k3s-uninstall.sh"
+            );
+            let rust_mandate = fs::read_to_string(root.join("ais.yaml"))
+                .map(|y| y.contains("LANG-RUST-001"))
+                .unwrap_or(false);
+            if rust_mandate && !is_container_or_k3s_hook {
+                violations += 1;
+                findings.push(Finding {
+                    rule_code: "LANG-RUST-001".to_string(),
+                    severity: Severity::Medium,
+                    message: format!(
+                        "Operational shell script '{}' violates Pure Rust Execution Mandate (LANG-RUST-001)",
+                        entry.path().display()
+                    ),
+                    file: entry.path().to_path_buf(),
+                    line: 1,
+                    confidence: Confidence::new(0.95),
+                    suppressed: None,
+                    hint: Some("Migrate periodic/operational logic into native Rust (shigaki-srv or xtask)".to_string()),
+                });
+            }
+        }
         if entry.file_type().is_dir()
             && (entry.file_name() == ".venv" || entry.file_name() == "__pycache__")
         {

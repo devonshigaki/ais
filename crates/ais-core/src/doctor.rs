@@ -2041,6 +2041,48 @@ pub fn run_ais_doctor_diagnostics(root: &Path) -> AisDoctorReport {
         ));
     }
 
+    // 41. DTC-AIS-041: Entity Default ServiceAccount & Multi-Entity Write-Fence Watchman (BND-ENT-007)
+    {
+        let bad_ns = "apiVersion: v1\nkind: ServiceAccount\nmetadata:\n  name: default\n  namespace: freshcredit\nautomountServiceAccountToken: true\n";
+        let bad_psi = "fn k8s_fence_deployments() -> &'static [(&'static str, u32)] {\n    &[(\"cloudflared\", 2)]\n}\n";
+        let good_psi = "fn k8s_fence_deployments() -> &'static [(&'static str, &'static str, u32)] {\n    &[(\"freshcredit-xyz\", \"freshcredit-vote\", 1), (\"freshcredit-org\", \"freshcredit-sign-org\", 1), (\"freshcredit-xyz\", \"freshcredit-sign-xyz\", 1), (\"personal-tism\", \"tism-sign\", 1)]\n}\n";
+
+        let tp_sa = !crate::entity_isolation::check_namespace_sa_automount_content(
+            Path::new("00-namespace.yaml"),
+            bad_ns,
+        )
+        .is_empty();
+        let tp_fence = !crate::entity_isolation::check_multi_entity_fence_coverage(
+            Path::new("psi.rs"),
+            bad_psi,
+        )
+        .is_empty();
+        let tn_fence = crate::entity_isolation::check_multi_entity_fence_coverage(
+            Path::new("psi.rs"),
+            good_psi,
+        )
+        .is_empty();
+        let tripped = tp_sa && tp_fence && tn_fence;
+
+        report.total_tests += 1;
+        if tripped {
+            report.passed_tests += 1;
+        } else {
+            report.failed_tests += 1;
+        }
+        report.dtcs.push(DiagnosticTroubleCode::new(
+            "DTC-AIS-041",
+            "Entity Default SA Automount & Multi-Entity Fence Watchman",
+            "Asserts BND-ENT-007 detects missing automountServiceAccountToken: false and omitted entity stateful deployments in psi.rs",
+            !tripped,
+            if tripped {
+                "BND-ENT-007 SA automount & multi-entity fence watchman verified".to_string()
+            } else {
+                "BND-ENT-007 watchman blind to SA token or multi-entity fence gap".to_string()
+            },
+        ));
+    }
+
     report
 }
 
@@ -2054,9 +2096,9 @@ mod tests {
         let report = run_ais_doctor_diagnostics(root);
         assert_eq!(
             report.failed_tests, 0,
-            "All 40 diagnostic fault-injection vectors must pass: {:?}",
+            "All 41 diagnostic fault-injection vectors must pass: {:?}",
             report.dtcs
         );
-        assert_eq!(report.passed_tests, 40);
+        assert_eq!(report.passed_tests, 41);
     }
 }

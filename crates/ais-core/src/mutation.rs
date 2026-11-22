@@ -85,6 +85,8 @@ pub struct MutationAnalysisReport {
     pub sample_mutations: Vec<MutationSite>,
     pub mutation_efficacy_score: f64,
     pub empirical_outcomes_present: bool,
+    pub is_heuristic_proxy: bool,
+    pub estimation_method: String,
     pub mutants_caught: u64,
     pub mutants_missed: u64,
 }
@@ -130,6 +132,8 @@ pub fn analyze_mutation_coverage(root: &Path) -> MutationAnalysisReport {
                         return MutationAnalysisReport {
                             mutation_efficacy_score: (score * 10.0).round() / 10.0,
                             empirical_outcomes_present: true,
+                            is_heuristic_proxy: false,
+                            estimation_method: "empirical_cargo_mutants".to_string(),
                             mutants_caught: caught,
                             mutants_missed: missed,
                             ..Default::default()
@@ -275,7 +279,7 @@ pub fn analyze_mutation_coverage(root: &Path) -> MutationAnalysisReport {
         }
     }
 
-    // Live empirical mutation efficacy: ratio of mutation sites guarded by test assertions
+    // Static heuristic site-coverage proxy (no cargo-mutants execution outcomes found)
     let branch_ratio = crate::test_gaps::compute_branch_coverage_ratio(root);
     let coverage_fraction = if report.total_mutation_sites > 0 {
         covered_mutation_sites as f64 / report.total_mutation_sites as f64
@@ -284,6 +288,8 @@ pub fn analyze_mutation_coverage(root: &Path) -> MutationAnalysisReport {
     };
     let score = (coverage_fraction * branch_ratio).clamp(0.0, 100.0);
     report.mutation_efficacy_score = (score * 10.0).round() / 10.0;
+    report.is_heuristic_proxy = true;
+    report.estimation_method = "heuristic_static_site_proxy".to_string();
     report
 }
 

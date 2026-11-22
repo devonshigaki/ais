@@ -56,6 +56,8 @@ enum Commands {
     Scan {
         #[arg(long)]
         json: bool,
+        #[arg(long)]
+        sync_docs: bool,
     },
     /// Contextual Risk Scoring (CRS) & RICE debt triage
     Risk {
@@ -99,7 +101,7 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// Audit legal-entity isolation boundaries (BND-ENT-001..004)
+    /// Audit legal-entity isolation boundaries (BND-ENT-001..007)
     EntityIsolation {
         #[arg(long)]
         json: bool,
@@ -122,7 +124,7 @@ fn main() -> ExitCode {
             limit,
         } => run_heal(&root, apply, auto_commit, sandbox, batch, rule, limit),
         Commands::Telemetry { log } => run_telemetry(&log),
-        Commands::Scan { json } => run_scan(&root, json),
+        Commands::Scan { json, sync_docs } => run_scan(&root, json, sync_docs),
         Commands::Risk { json } => run_risk(&root, json),
         Commands::Churn { days, json } => run_churn(&root, days, json),
         Commands::Mutate { json } => run_mutate(&root, json),
@@ -342,6 +344,71 @@ fn run_architecture(root: &Path, json: bool) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+fn collect_workspace_findings(root: &Path) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    let (_graph, taint_findings) = ais_core::scan_taint_violations(root);
+    findings.extend(taint_findings);
+
+    let struct_report = ais_core::scan_codebase_structure(root);
+    findings.extend(struct_report.findings);
+    findings.extend(ais_core::scan_entity_isolation(root));
+
+    let rust_health = ais_core::analyze_workspace_rust_health(root, 0);
+    if rust_health.production_unwraps > 0 {
+        findings.push(Finding::new(
+            "RUST-UNWRAP-001",
+            ais_core::Severity::High,
+            format!(
+                "{} production .unwrap() call(s) detected outside #[cfg(test)]",
+                rust_health.production_unwraps
+            ),
+            PathBuf::from("crates"),
+            1,
+        ));
+    }
+    if rust_health.production_expects > 0 {
+        findings.push(Finding::new(
+            "RUST-EXPECT-001",
+            ais_core::Severity::Medium,
+            format!(
+                "{} production .expect() call(s) detected outside #[cfg(test)]",
+                rust_health.production_expects
+            ),
+            PathBuf::from("crates"),
+            1,
+        ));
+    }
+    let metrics = scan_codebase_metrics(root);
+    for f in &metrics.files_above_ccn_goal {
+        findings.push(Finding::new(
+            "METRIC-CCN-001",
+            ais_core::Severity::Medium,
+            format!(
+                "High cyclomatic complexity ({} CCN > 10) in {}",
+                f.ccn,
+                f.path.display()
+            ),
+            f.path.clone(),
+            1,
+        ));
+    }
+    for f in &metrics.files_below_mi_goal {
+        findings.push(Finding::new(
+            "METRIC-MI-001",
+            ais_core::Severity::Medium,
+            format!(
+                "Low maintainability index ({:.1} MI < 80) in {}",
+                f.mi,
+                f.path.display()
+            ),
+            f.path.clone(),
+            1,
+        ));
+    }
+    ais_core::rank_findings_by_risk(&mut findings);
+    findings
+}
+
 fn run_ratchet(root: &Path, ci: bool, update: bool) -> ExitCode {
     let valid_root = if root.join("Cargo.toml").exists() {
         root.to_path_buf()
@@ -349,32 +416,97 @@ fn run_ratchet(root: &Path, ci: bool, update: bool) -> ExitCode {
         ais_core::structure::find_workspace_root(root)
     };
 
-    let mut cmd = Command::new("cargo");
-    cmd.args(["xtask", "ratchet"]).current_dir(&valid_root);
-    if ci {
-        cmd.arg("--ci");
-    }
-    if update {
-        cmd.arg("--update");
-    }
-    match cmd.status() {
-        Ok(status) => {
-            if status.success() {
-                if update {
-                    let _ = Command::new("cargo")
-                        .args(["xtask", "report"])
-                        .current_dir(&valid_root)
-                        .status();
+    if valid_root.join("xtask/Cargo.toml").exists() {
+        let mut cmd = Command::new("cargo");
+        cmd.args(["xtask", "ratchet"]).current_dir(&valid_root);
+        if ci {
+            cmd.arg("--ci");
+        }
+        if update {
+            cmd.arg("--update");
+        }
+        return match cmd.status() {
+            Ok(status) => {
+                if status.success() {
+                    if update {
+                        let _ = Command::new("cargo")
+                            .args(["xtask", "report"])
+                            .current_dir(&valid_root)
+                            .status();
+                    }
+                    ExitCode::SUCCESS
+                } else {
+                    ExitCode::FAILURE
                 }
-                ExitCode::SUCCESS
-            } else {
+            }
+            Err(e) => {
+                eprintln!("Failed to execute cargo xtask ratchet: {}", e);
                 ExitCode::FAILURE
             }
-        }
-        Err(e) => {
-            eprintln!("Failed to execute cargo xtask ratchet: {}", e);
-            ExitCode::FAILURE
-        }
+        };
+    }
+
+    let metrics = scan_codebase_metrics(&valid_root);
+    let rust_health = ais_core::analyze_workspace_rust_health(&valid_root, 0);
+    let (_g, taint_findings) = ais_core::scan_taint_violations(&valid_root);
+    let mut current = std::collections::BTreeMap::new();
+    current.insert(
+        "maintainability_index_avg".to_string(),
+        metrics.avg_mi as f64,
+    );
+    current.insert(
+        "maintainability_index_min".to_string(),
+        metrics.min_mi as f64,
+    );
+    current.insert("complexity_ccn_max".to_string(), metrics.max_ccn as f64);
+    current.insert("complexity_ccn_avg".to_string(), metrics.avg_ccn as f64);
+    current.insert(
+        "production_unwraps_max".to_string(),
+        rust_health.production_unwraps as f64,
+    );
+    current.insert(
+        "production_expects_max".to_string(),
+        rust_health.production_expects as f64,
+    );
+    current.insert(
+        "unsafe_blocks_production".to_string(),
+        rust_health.unsafe_blocks as f64,
+    );
+    current.insert(
+        "taint_analysis_critical".to_string(),
+        taint_findings.len() as f64,
+    );
+
+    let baseline_path = if valid_root.join("audit/raw/ratchet_baseline.json").exists() {
+        valid_root.join("audit/raw/ratchet_baseline.json")
+    } else {
+        valid_root.join(".ais/ratchet_baseline.json")
+    };
+    let baseline = ais_core::load_ratchet_baseline(&baseline_path);
+    let (evals, regressions) = ais_core::evaluate_ratchet_metrics(&current, &baseline);
+
+    println!("╔══════════════════════════════════════════════════════════════════╗");
+    println!("║   AIS STANDALONE UNIVERSAL RATCHET                               ║");
+    println!("╚══════════════════════════════════════════════════════════════════╝\n");
+    for ev in &evals {
+        println!(
+            "  {:<28} curr={:<8.2} base={:<8.2} goal={:<8.2} [{}]",
+            ev.name, ev.current, ev.baseline, ev.goal, ev.status
+        );
+    }
+    if update {
+        let updated = ais_core::update_ratchet_baseline_monotonic(&baseline, &current);
+        ais_core::save_ratchet_baseline(&baseline_path, &updated);
+        println!(
+            "\n✅ Monotonic baseline saved to {}",
+            baseline_path.display()
+        );
+    }
+    if ci && regressions > 0 {
+        eprintln!("\n🛑 RATCHET FAILED: {regressions} regression(s) detected.");
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
     }
 }
 
@@ -403,9 +535,10 @@ fn run_heal(
         api_key: None,
     };
 
-    let sample_findings = Vec::<Finding>::new();
-    let report = ais_core::execute_autonomous_healer(root, &sample_findings, &config);
+    let findings = collect_workspace_findings(root);
+    let report = ais_core::execute_autonomous_healer(root, &findings, &config);
 
+    println!("Workspace Findings:  {}", findings.len());
     println!("Candidate Patches:   {}", report.patches_synthesized);
     println!("Patches Applied:     {}", report.patches_applied);
     println!("Build Verified:      {}", report.patches_verified);
@@ -454,7 +587,7 @@ fn run_telemetry(log_path: &Path) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn run_scan(root: &Path, json: bool) -> ExitCode {
+fn run_scan(root: &Path, json: bool, sync_docs: bool) -> ExitCode {
     let report = scan_codebase_metrics(root);
     if json {
         println!(
@@ -473,6 +606,7 @@ fn run_scan(root: &Path, json: bool) -> ExitCode {
     println!("Average Maintainability:{:.1} / 100", report.avg_mi);
 
     println!("\n🔍 Running AIS Code Quality & Compliance Gates...");
+    let has_xtask = root.join("xtask/Cargo.toml").exists();
 
     // Check 1: Code Formatting
     print!("  • Code Formatting (rustfmt)... ");
@@ -487,29 +621,44 @@ fn run_scan(root: &Path, json: bool) -> ExitCode {
         println!("❌ FAIL (formatting diffs detected, run `cargo fmt --all`)");
     }
 
-    // Check 2: Architecture, Security & Design Compliance
-    print!("  • Architecture & Frontend Compliance... ");
-    let comp_status = Command::new("cargo")
-        .args(["xtask", "compliance", "--tier=all"])
-        .current_dir(root)
-        .status();
-    let comp_ok = comp_status.map(|s| s.success()).unwrap_or(false);
+    let (comp_ok, audit_ok, pot_ok, recon_ok) = if has_xtask {
+        // Check 2: Architecture, Security & Design Compliance
+        print!("  • Architecture & Frontend Compliance... ");
+        let comp_status = Command::new("cargo")
+            .args(["xtask", "compliance", "--tier=all"])
+            .current_dir(root)
+            .status();
+        let comp_ok = comp_status.map(|s| s.success()).unwrap_or(false);
 
-    // Check 3: 14 Comprehensive Quality Dimensions
-    print!("  • 14 Comprehensive Quality Dimensions... ");
-    let audit_status = Command::new("cargo")
-        .args(["xtask", "audit-proprietary", "--fast"])
-        .current_dir(root)
-        .status();
-    let audit_ok = audit_status.map(|s| s.success()).unwrap_or(false);
+        // Check 3: 14 Comprehensive Quality Dimensions
+        print!("  • 14 Comprehensive Quality Dimensions... ");
+        let audit_status = Command::new("cargo")
+            .args(["xtask", "audit-proprietary", "--fast"])
+            .current_dir(root)
+            .status();
+        let audit_ok = audit_status.map(|s| s.success()).unwrap_or(false);
 
-    // Check 4: Power of Ten Safety-Critical Invariants
-    print!("  • Power of Ten Safety-Critical Invariants (POT)... ");
-    let pot_status = Command::new("cargo")
-        .args(["xtask", "pot"])
-        .current_dir(root)
-        .status();
-    let pot_ok = pot_status.map(|s| s.success()).unwrap_or(false);
+        // Check 4: Power of Ten Safety-Critical Invariants
+        print!("  • Power of Ten Safety-Critical Invariants (POT)... ");
+        let pot_status = Command::new("cargo")
+            .args(["xtask", "pot"])
+            .current_dir(root)
+            .status();
+        let pot_ok = pot_status.map(|s| s.success()).unwrap_or(false);
+
+        (comp_ok, audit_ok, pot_ok, true)
+    } else {
+        let rust_health = ais_core::analyze_workspace_rust_health(root, 0);
+        let pot_ok = rust_health.production_unwraps == 0;
+        println!(
+            "  • Standalone Rust Health Gate... {} (unwraps={}, expects={}, unsafe={})",
+            if pot_ok { "✅ PASS" } else { "❌ FAIL" },
+            rust_health.production_unwraps,
+            rust_health.production_expects,
+            rust_health.unsafe_blocks
+        );
+        (true, true, pot_ok, true)
+    };
 
     // Check 5: Inter-Procedural Semantic Callgraph & Taint-Flow Analysis
     print!("  • Semantic Callgraph & Taint Flow (TAINT)... ");
@@ -528,12 +677,26 @@ fn run_scan(root: &Path, json: bool) -> ExitCode {
     }
 
     // Check 6: Rule Contradiction Reconciler & Precedence Matrix
-    print!("  • Rule Contradiction Reconciler & Harmony Matrix... ");
-    let recon_status = Command::new("cargo")
-        .args(["xtask", "reconcile"])
-        .current_dir(root)
-        .status();
-    let recon_ok = recon_status.map(|s| s.success()).unwrap_or(false);
+    let recon_ok = if has_xtask {
+        print!("  • Rule Contradiction Reconciler & Harmony Matrix... ");
+        let recon_status = Command::new("cargo")
+            .args(["xtask", "reconcile"])
+            .current_dir(root)
+            .status();
+        recon_status.map(|s| s.success()).unwrap_or(false)
+    } else {
+        let overlaps = ais_core::audit_rule_overlap_matrix();
+        println!(
+            "  • Rule Overlap Matrix (Standalone)... {}",
+            if overlaps.is_empty() {
+                "✅ PASS (0 overlapping rule triggers)"
+            } else {
+                "⚠️  OVERLAP DETECTED"
+            }
+        );
+        let _ = recon_ok;
+        overlaps.is_empty()
+    };
 
     // Check 7: Semantic Deduplication & MinHash LSH Clones
     print!("  • Semantic Deduplication & MinHash LSH Clones... ");
@@ -562,10 +725,20 @@ fn run_scan(root: &Path, json: bool) -> ExitCode {
     // Check 8: AST Mutation Testing Efficacy
     print!("  • AST Mutation Testing Efficacy Gate... ");
     let mutation_report = ais_core::analyze_mutation_coverage(root);
-    println!(
-        "✅ PASS ({:.1}% mutation score across {} sites)",
-        mutation_report.mutation_efficacy_score, mutation_report.total_mutation_sites
-    );
+    if mutation_report.empirical_outcomes_present {
+        println!(
+            "✅ PASS ({:.1}% empirical mutant kill rate: {}/{} caught across {} sites)",
+            mutation_report.mutation_efficacy_score,
+            mutation_report.mutants_caught,
+            mutation_report.mutants_caught + mutation_report.mutants_missed,
+            mutation_report.total_mutation_sites
+        );
+    } else {
+        println!(
+            "⚠️  HEURISTIC ({:.1}% static site-coverage proxy across {} sites; run cargo-mutants for empirical kill rate)",
+            mutation_report.mutation_efficacy_score, mutation_report.total_mutation_sites
+        );
+    }
 
     // Check 9: Empirical Code Churn & Hazard Engine
     print!("  • Empirical Code Churn & Hazard Engine... ");
@@ -601,28 +774,29 @@ fn run_scan(root: &Path, json: bool) -> ExitCode {
         }
     }
 
-    // Auto-Synchronization of Living Backlog and Audit Documentation
-    println!("\n📝 Synchronizing Codebase Documentation & Living Backlog...");
-    print!("  • Updating docs/BACKLOG.md (RICE & Financial Debt Ledger)... ");
-    let backlog_status = Command::new("cargo")
-        .args(["xtask", "harvest-backlog"])
-        .current_dir(root)
-        .status();
-    if backlog_status.map(|s| s.success()).unwrap_or(false) {
-        println!("✅ SYNCHRONIZED");
-    } else {
-        println!("⚠️  WARNING (failed to harvest backlog)");
-    }
+    if sync_docs && has_xtask {
+        println!("\n📝 Synchronizing Codebase Documentation & Living Backlog...");
+        print!("  • Updating docs/BACKLOG.md (RICE & Financial Debt Ledger)... ");
+        let backlog_status = Command::new("cargo")
+            .args(["xtask", "harvest-backlog"])
+            .current_dir(root)
+            .status();
+        if backlog_status.map(|s| s.success()).unwrap_or(false) {
+            println!("✅ SYNCHRONIZED");
+        } else {
+            println!("⚠️  WARNING (failed to harvest backlog)");
+        }
 
-    print!("  • Updating audit/compliance-executive-summary.md & telemetry... ");
-    let report_status = Command::new("cargo")
-        .args(["xtask", "report"])
-        .current_dir(root)
-        .status();
-    if report_status.map(|s| s.success()).unwrap_or(false) {
-        println!("✅ SYNCHRONIZED");
-    } else {
-        println!("⚠️  WARNING (failed to generate executive report)");
+        print!("  • Updating audit/compliance-executive-summary.md & telemetry... ");
+        let report_status = Command::new("cargo")
+            .args(["xtask", "report"])
+            .current_dir(root)
+            .status();
+        if report_status.map(|s| s.success()).unwrap_or(false) {
+            println!("✅ SYNCHRONIZED");
+        } else {
+            println!("⚠️  WARNING (failed to generate executive report)");
+        }
     }
 
     if fmt_ok && comp_ok && audit_ok && pot_ok && taint_ok && recon_ok {
@@ -658,7 +832,7 @@ fn run_entity_isolation(root: &Path, json: bool) -> ExitCode {
             serde_json::to_string_pretty(&findings).unwrap_or_default()
         );
     } else if findings.is_empty() {
-        println!("✅ ENTITY ISOLATION: 0 cross-entity leaks detected (BND-ENT-001..004).");
+        println!("✅ ENTITY ISOLATION: 0 cross-entity leaks detected (BND-ENT-001..007).");
     } else {
         eprintln!(
             "❌ ENTITY ISOLATION VIOLATIONS ({} finding(s)):",
@@ -681,32 +855,38 @@ fn run_entity_isolation(root: &Path, json: bool) -> ExitCode {
     }
 }
 
-fn run_risk(_root: &Path, json: bool) -> ExitCode {
-    let sample_finding = Finding::new(
-        "ARCH-001",
-        ais_core::Severity::High,
-        "Architectural drift detected in service layer",
-        PathBuf::from("routes/service.rs"),
-        1,
-    );
-    let risk_eval = ais_core::evaluate_risk(&sample_finding);
+fn run_risk(root: &Path, json: bool) -> ExitCode {
+    let findings = collect_workspace_findings(root);
+    let assessments: Vec<_> = findings.iter().map(ais_core::evaluate_risk).collect();
 
     if json {
         println!(
-            "{{\"crs_score\":{:.1},\"rice_score\":{:.1},\"severity\":\"HIGH\"}}",
-            risk_eval.contextual_risk_score, risk_eval.rice.rice_score
+            "{}",
+            serde_json::to_string_pretty(&assessments).unwrap_or_else(|_| "[]".to_string())
         );
-    } else {
-        println!("╔══════════════════════════════════════════════════════════════════╗");
-        println!("║   AIS CONTEXTUAL RISK SCORING (CRS) & RICE TRIAGE                ║");
-        println!("╚══════════════════════════════════════════════════════════════════╝\n");
-        println!("Triage Formula: Base Severity × Reach Vector × Criticality × Confidence");
+        return ExitCode::SUCCESS;
+    }
+
+    println!("╔══════════════════════════════════════════════════════════════════╗");
+    println!("║   AIS CONTEXTUAL RISK SCORING (CRS) & RICE TRIAGE                ║");
+    println!("╚══════════════════════════════════════════════════════════════════╝\n");
+    println!("Triage Formula: Base Severity × Reach Vector × Criticality × Confidence");
+    println!("Workspace Findings Evaluated: {}\n", assessments.len());
+    for (idx, a) in assessments.iter().take(15).enumerate() {
         println!(
-            "Sample Evaluated CRS: {:.1} / 100",
-            risk_eval.contextual_risk_score
+            "  [{:>2}] CRS={:>5.1} | RICE={:>5.1} | {} | [{}] {}:{} — {}",
+            idx + 1,
+            a.contextual_risk_score,
+            a.rice.rice_score,
+            a.priority,
+            a.finding.rule_code,
+            a.finding.file.display(),
+            a.finding.line,
+            a.finding.message
         );
-        println!("Priority Assignment:  {:?}", risk_eval.priority);
-        println!("RICE Score:           {:.1}", risk_eval.rice.rice_score);
+    }
+    if assessments.is_empty() {
+        println!("  ✅ Zero active workspace findings detected.");
     }
     ExitCode::SUCCESS
 }
@@ -755,10 +935,19 @@ fn run_mutate(root: &Path, json: bool) -> ExitCode {
         println!("Comparison Inversions:   {}", report.comparison_mutations);
         println!("Boolean Flips:           {}", report.boolean_mutations);
         println!(
-            "Mutation Score Floor:    {:.1}%",
-            report.mutation_efficacy_score
+            "Mutation Score Floor:    {:.1}% ({})",
+            report.mutation_efficacy_score,
+            if report.empirical_outcomes_present {
+                "empirical cargo-mutants outcomes"
+            } else {
+                "heuristic static site-coverage proxy — no mutants executed"
+            }
         );
-        println!("\n✅ AST Mutation testing efficacy verified: test assertions guard invariant boundaries.");
+        if report.empirical_outcomes_present {
+            println!("\n✅ AST Mutation testing efficacy verified against cargo-mutants outcomes.");
+        } else {
+            println!("\n⚠️  Heuristic static proxy only: execute cargo-mutants for empirical mutant kill rate.");
+        }
     }
     ExitCode::SUCCESS
 }

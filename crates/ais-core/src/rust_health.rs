@@ -110,6 +110,31 @@ fn is_cargo_subcommand_available(bin_name: &str) -> bool {
     false
 }
 
+fn strip_string_literals_for_scan(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars().peekable();
+    let mut in_str = false;
+    let mut escaped = false;
+    while let Some(c) = chars.next() {
+        if in_str {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_str = false;
+                out.push('"');
+            }
+        } else if c == '"' {
+            in_str = true;
+            out.push('"');
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// Analyze workspace Rust health invariants
 pub fn analyze_workspace_rust_health(
     root: &Path,
@@ -169,11 +194,12 @@ pub fn analyze_workspace_rust_health(
                 continue;
             }
 
-            unsafe_blocks += UNSAFE_RE.find_iter(trimmed).count();
-            production_unwraps += UNWRAP_RE.find_iter(trimmed).count();
-            production_expects += EXPECT_RE.find_iter(trimmed).count();
+            let code_only = strip_string_literals_for_scan(trimmed);
+            unsafe_blocks += UNSAFE_RE.find_iter(&code_only).count();
+            production_unwraps += UNWRAP_RE.find_iter(&code_only).count();
+            production_expects += EXPECT_RE.find_iter(&code_only).count();
 
-            if PROD_ASSERT_RE.is_match(trimmed) {
+            if PROD_ASSERT_RE.is_match(&code_only) {
                 production_asserts += 1;
             }
 

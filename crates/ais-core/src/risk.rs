@@ -52,15 +52,24 @@ fn calculate_factors(path_str: &str, severity: Severity) -> (f32, f32, f32) {
     let path = path_str.to_lowercase();
     let reach = if path.contains("tests/") || path.contains("test_") || path.contains("fixtures/") {
         0.25
-    } else if path.contains("apps/product/api/src/routes/") || path.contains("routes/v1/") {
+    } else if path.contains("apps/product/api/src/routes/")
+        || path.contains("routes/v1/")
+        || path.contains("infra/cloudflare/")
+    {
         1.30
     } else if path.contains("apps/product/app/src/routes/")
         || path.contains("routes/")
         || path.contains("api/")
+        || path.contains("infra/k8s/")
+        || path.contains("infra/mail/")
     {
         1.15
     } else if path.contains("infra/terraform")
         || path.contains("infra/gcp")
+        || path.contains("infra/scripts/")
+        || path.contains("crates/shigaki-srv/src/verify/")
+        || path.contains("crates/shigaki-srv/src/psi")
+        || path.contains("crates/shigaki-srv/src/ebpf_trace")
         || path.contains("apps/product/native/")
         || path.contains("apps/native/")
     {
@@ -78,6 +87,9 @@ fn calculate_factors(path_str: &str, severity: Severity) -> (f32, f32, f32) {
         || path.contains("crypto")
         || path.contains("auth")
         || path.contains("kms")
+        || path.contains("unseal")
+        || path.contains("failover")
+        || path.contains("fencing")
     {
         1.35
     } else if path.contains("payment")
@@ -85,12 +97,20 @@ fn calculate_factors(path_str: &str, severity: Severity) -> (f32, f32, f32) {
         || path.contains("stripe")
         || path.contains("settlement")
         || path.contains("wallet")
+        || path.contains("dr_backup")
+        || path.contains("dr_restore")
+        || path.contains("wal_stream")
+        || path.contains("rpo_hourly")
     {
         1.30
     } else if path.contains("pii")
         || path.contains("identity")
         || path.contains("kyc")
         || path.contains("user_profile")
+        || path.contains("postgres")
+        || path.contains("sqld")
+        || path.contains("traefik")
+        || path.contains("prometheus")
     {
         1.25
     } else if path.contains("template")
@@ -194,4 +214,48 @@ pub fn rank_findings_by_risk(findings: &mut [Finding]) {
             .partial_cmp(&risk_a)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::findings::Confidence;
+    use std::path::PathBuf;
+
+    #[test]
+    fn prioritizes_sovereign_dr_and_edge_failover_above_generic_scripts() {
+        let edge_finding = Finding::new(
+            "TEST-001",
+            Severity::Medium,
+            "edge timeout",
+            PathBuf::from("infra/cloudflare/failover-worker.js"),
+            1,
+        )
+        .with_confidence(Confidence::new(0.9));
+        let dr_finding = Finding::new(
+            "TEST-002",
+            Severity::Medium,
+            "dr script gap",
+            PathBuf::from("infra/scripts/unified_dr_backup.sh"),
+            1,
+        )
+        .with_confidence(Confidence::new(0.9));
+        let generic_script = Finding::new(
+            "TEST-003",
+            Severity::Medium,
+            "helper script",
+            PathBuf::from("scripts/dev_helper.sh"),
+            1,
+        )
+        .with_confidence(Confidence::new(0.9));
+
+        assert!(
+            evaluate_risk(&edge_finding).contextual_risk_score
+                > evaluate_risk(&generic_script).contextual_risk_score
+        );
+        assert!(
+            evaluate_risk(&dr_finding).contextual_risk_score
+                > evaluate_risk(&generic_script).contextual_risk_score
+        );
+    }
 }

@@ -96,6 +96,10 @@ fn tokenize_and_normalize(code: &str) -> Vec<String> {
                 let mut hasher = DefaultHasher::new();
                 lit.hash(&mut hasher);
                 tokens.push(format!("SQL_{:x}", hasher.finish()));
+            } else if lit.len() >= 5 {
+                let mut hasher = DefaultHasher::new();
+                lit.hash(&mut hasher);
+                tokens.push(format!("STR_{:x}", hasher.finish()));
             } else {
                 tokens.push("LIT_STR".to_string());
             }
@@ -472,5 +476,54 @@ mod tests {
 
         let clusters = detect_lsh_duplicate_clusters(&[fp1, fp2], 70.0);
         assert_eq!(clusters.len(), 1);
+    }
+
+    #[test]
+    fn test_minhash_distinguishes_distinct_command_checks() {
+        let fn_a = r#"
+            pub fn check_bare_metal_daemons(errs: &mut Vec<String>) {
+                if let Ok(o) = Command::new("systemctl").args(["is-active", "psi-load-shedder.service"]).output() {
+                    if String::from_utf8_lossy(&o.stdout).trim() != "active" {
+                        errs.push("psi-load-shedder inactive".to_string());
+                    }
+                }
+                if let Ok(v) = std::fs::read_to_string("/proc/sys/net/ipv4/conf/all/arp_ignore") {
+                    if v.trim() != "1" {
+                        errs.push("arp_ignore mismatch".to_string());
+                    }
+                }
+            }
+        "#;
+        let fn_b = r#"
+            pub fn check_mail_deliverability(errs: &mut Vec<String>) {
+                if let Ok(o) = Command::new("postconf").args(["-h", "smtpd_tls_security_level"]).output() {
+                    if String::from_utf8_lossy(&o.stdout).trim() != "may" {
+                        errs.push("postfix tls disabled".to_string());
+                    }
+                }
+                if let Ok(v) = std::fs::read_to_string("/etc/freshcredit/mail-secrets.env") {
+                    if v.trim().is_empty() {
+                        errs.push("mail-secrets missing".to_string());
+                    }
+                }
+            }
+        "#;
+        let fp_a = fingerprint_code_snippet(
+            PathBuf::from("hw.rs"),
+            "check_bare_metal_daemons".to_string(),
+            1,
+            fn_a,
+        );
+        let fp_b = fingerprint_code_snippet(
+            PathBuf::from("mail.rs"),
+            "check_mail_deliverability".to_string(),
+            1,
+            fn_b,
+        );
+        let sim = estimate_jaccard_similarity(&fp_a.signature, &fp_b.signature);
+        assert!(
+            sim < 90.0,
+            "Distinct domain checks must not false-positive >=90% similarity, got {sim:.1}%"
+        );
     }
 }

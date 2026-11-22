@@ -500,36 +500,15 @@ fn extract_polyglot_classes(content: &str, ext: &str) -> Vec<StructDefinition> {
         }
 
         let body_block = &rem[open_rel + 1..end_rel];
-        let mut fields = Vec::new();
-        for f_cap in POLY_FIELD_RE.captures_iter(body_block) {
-            let f_name = f_cap[1].to_string();
-            if !matches!(
-                f_name.as_str(),
-                "if" | "else"
-                    | "for"
-                    | "while"
-                    | "return"
-                    | "const"
-                    | "let"
-                    | "var"
-                    | "function"
-                    | "func"
-                    | "fun"
-                    | "public"
-                    | "private"
-                    | "protected"
-            ) {
-                fields.push(f_name);
-            }
-        }
-
+        let mut method_names: HashSet<String> = HashSet::new();
         let mut methods = Vec::new();
         for m_cap in POLY_METHOD_RE.captures_iter(body_block) {
             let m_name = m_cap[1].to_string();
-            if matches!(
-                m_name.as_str(),
-                "constructor" | "render" | "if" | "for" | "while" | "catch" | "switch"
-            ) {
+            if matches!(m_name.as_str(), "if" | "for" | "while" | "catch" | "switch") {
+                continue;
+            }
+            method_names.insert(m_name.clone());
+            if matches!(m_name.as_str(), "constructor" | "render") {
                 continue;
             }
 
@@ -551,6 +530,72 @@ fn extract_polyglot_classes(content: &str, ext: &str) -> Vec<StructDefinition> {
                 }
                 let fn_body = m_slice[brace_rel..fn_end].to_string();
                 methods.push((m_name, fn_body));
+            }
+        }
+
+        // Only scan top-level class body lines (brace depth 0) for field declarations
+        // so local `const`/`let`/`var` variables and object literals inside methods are never counted as fields.
+        let mut top_level_lines = String::new();
+        let mut brace_depth: usize = 0;
+        for line in body_block.lines() {
+            if brace_depth == 0 {
+                top_level_lines.push_str(line);
+                top_level_lines.push('\n');
+            }
+            for ch in line.chars() {
+                if ch == '{' {
+                    brace_depth += 1;
+                } else if ch == '}' {
+                    brace_depth = brace_depth.saturating_sub(1);
+                }
+            }
+        }
+
+        let mut field_set: HashSet<String> = HashSet::new();
+        let mut fields = Vec::new();
+        for f_cap in POLY_FIELD_RE.captures_iter(&top_level_lines) {
+            let f_name = f_cap[1].to_string();
+            if !matches!(
+                f_name.as_str(),
+                "if" | "else"
+                    | "for"
+                    | "while"
+                    | "return"
+                    | "const"
+                    | "let"
+                    | "var"
+                    | "function"
+                    | "func"
+                    | "fun"
+                    | "public"
+                    | "private"
+                    | "protected"
+            ) && !method_names.contains(&f_name)
+                && field_set.insert(f_name.clone())
+            {
+                fields.push(f_name);
+            }
+        }
+
+        // For JS/TS classes where instance state is initialized via `this.<prop> = ...`
+        if matches!(ext, "js" | "mjs" | "ts" | "tsx") {
+            let mut rest = body_block;
+            while let Some(pos) = rest.find("this.") {
+                let after = &rest[pos + 5..];
+                let ident: String = after
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                    .collect();
+                let tail = after[ident.len()..].trim_start();
+                if !ident.is_empty()
+                    && tail.starts_with('=')
+                    && !tail.starts_with("==")
+                    && !method_names.contains(&ident)
+                    && field_set.insert(ident.clone())
+                {
+                    fields.push(ident);
+                }
+                rest = &rest[pos + 5..];
             }
         }
 
@@ -721,5 +766,46 @@ mod tests {
             lcom4, 2,
             "Expected 2 independent method clusters (split-brain)"
         );
+    }
+
+    #[test]
+    fn test_js_class_ignores_method_locals_and_counts_this_fields() {
+        let js = r#"
+export class SovereignEpochCoordinator extends DurableObject {
+  constructor(ctx, env) {
+    super(ctx, env);
+    this.sql = ctx.storage.sql;
+  }
+
+  getRow() {
+    const query = "SELECT * FROM state";
+    return this.sql.exec(query).one();
+  }
+
+  computeView(now) {
+    const row = this.getRow();
+    let mode = "ACTIVE";
+    const obj = {
+      epoch: row.epoch,
+      leader: row.leader,
+      mode: mode
+    };
+    return obj;
+  }
+
+  alarm() {
+    const now = Date.now();
+    const view = this.computeView(now);
+    const remaining = view.epoch + 1;
+    return remaining;
+  }
+}
+"#;
+        let classes = extract_polyglot_classes(js, "js");
+        assert_eq!(classes.len(), 1);
+        let (name, fields, methods) = &classes[0];
+        assert_eq!(name, "SovereignEpochCoordinator");
+        assert_eq!(fields, &vec!["sql".to_string()]);
+        assert_eq!(methods.len(), 3);
     }
 }
